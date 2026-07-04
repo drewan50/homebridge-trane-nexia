@@ -221,8 +221,14 @@ export class ThermostatAccessory {
     else if (value === Characteristic.TargetHeatingCoolingState.COOL) mode = 'COOL';
     else if (value === Characteristic.TargetHeatingCoolingState.AUTO) mode = 'AUTO';
     this.platform.log.info(`[${this.displayName()}] set mode -> ${mode}`);
-    await this.nexia.setZoneMode(this.zone, mode);
-    this.zone.current_zone_mode = mode;
+    try {
+      await this.nexia.setZoneMode(this.zone, mode);
+      this.zone.current_zone_mode = mode;
+    } catch (e) {
+      this.platform.log.error(`[${this.displayName()}] failed to set mode -> ${mode}:`, (e as Error).message);
+      const { HapStatusError, HAPStatus } = this.platform.api.hap;
+      throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
   }
 
   private async setTargetTemp(value: CharacteristicValue): Promise<void> {
@@ -253,7 +259,13 @@ export class ThermostatAccessory {
       }
     }
     this.platform.log.info(`[${this.displayName()}] set setpoints ${JSON.stringify(payload)} (native ${this.nativeScale()})`);
-    await this.nexia.setSetpoints(this.zone, payload);
+    try {
+      await this.nexia.setSetpoints(this.zone, payload);
+    } catch (e) {
+      this.platform.log.error(`[${this.displayName()}] failed to set setpoints ${JSON.stringify(payload)}:`, (e as Error).message);
+      const { HapStatusError, HAPStatus } = this.platform.api.hap;
+      throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
     if (payload.heat !== undefined) this.zone.heating_setpoint = payload.heat;
     if (payload.cool !== undefined) this.zone.cooling_setpoint = payload.cool;
     this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, this.targetTempC());

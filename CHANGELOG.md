@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-04
+
+### Changed
+
+- CI now tests against Node.js 18, 20, 22, and 24 (previously stopped at 22).
+- Setting mode or target temperature now catches Nexia API failures, logs a clear error, and reports `SERVICE_COMMUNICATION_FAILURE` to HomeKit instead of letting the error propagate unhandled.
+
 ## [1.1.0] - 2026-07-04
 
 ### Added
