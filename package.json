@@ -1,7 +1,7 @@
 {
   "displayName": "Trane Nexia Thermostat",
   "name": "homebridge-trane-nexia",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Homebridge dynamic-platform plugin for Trane / American Standard thermostats (XL824, XL850, XL950, XL1050) via the Nexia cloud API",
   "license": "MIT",
   "author": "drewan50",

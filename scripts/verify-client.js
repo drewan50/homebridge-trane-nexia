@@ -111,6 +111,10 @@ async function main() {
       const hum = t.indoor_humidity;
       const humN = hum != null && hum !== '' ? Number(hum) : null;
       console.log(`    Humidity        : ${t.has_indoor_humidity ? (humN != null ? `${humN}%` : '—') : '(not advertised)'}`);
+      const out = t.outdoor_temperature;
+      const outN = out != null && out !== '' ? Number(out) : null;
+      const outC = outN != null ? (scale === 'f' ? fToC(outN) : Math.round(outN * 10) / 10) : null;
+      console.log(`    Outdoor Temp    : ${t.has_outdoor_temperature ? (outC != null ? `${outC}°C (native ${outN}°${scale.toUpperCase()})` : '—') : '(not advertised)'}`);
       console.log(`  raw zone state:`);
       console.log(`    current_zone_mode=${z.current_zone_mode}  heating_setpoint=${z.heating_setpoint}  cooling_setpoint=${z.cooling_setpoint}`);
       console.log(`    thermostat.system_status=${JSON.stringify(t.system_status)}`);

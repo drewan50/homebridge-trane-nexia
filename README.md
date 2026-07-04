@@ -165,6 +165,7 @@ Open the Homebridge Config UI at `http://<homebridge-ip>:8581`, go to **Config**
 | `apiKey`       | yes      | —        | From `nexia-activate` |
 | `houseId`      | no       | auto     | Numeric house ID from the URL. Omit to auto-discover from session. |
 | `pollInterval` | no       | `30`     | Seconds between Nexia API polls. Minimum 10. |
+| `outdoorTemperatureSensor` | no | `true` | Expose a HomeKit temperature sensor for the outdoor reading. Set `false` to disable. |
 | `appVersion`   | no       | —        | Only needed for `brand: "asair"` (sent as `X-AppVersion`). |
 | `apiUrl`       | no       | —        | Override the Nexia API base URL (for debugging). |
 | `debug`        | no       | `false`  | Log all Nexia HTTP calls to the Homebridge log. |
@@ -192,6 +193,10 @@ One HomeKit **Thermostat** accessory is created per zone. On single-zone thermos
 | Model              | `features[advanced_info].items[label="Model"]` |
 | Serial Number      | `features[advanced_info].items[label="AUID"]` |
 | Firmware Revision  | `features[advanced_info].items[label="Firmware Version"]` |
+
+### Outdoor temperature sensor
+
+If any thermostat on the account reports `has_outdoor_temperature`, the plugin adds one additional HomeKit **Temperature Sensor** accessory named "Outdoor Temperature" (shared across the house — Nexia reports a single outdoor reading, not one per thermostat). Disable it with `"outdoorTemperatureSensor": false` in the config.
 
 ### Writing setpoints
 

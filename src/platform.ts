@@ -10,6 +10,7 @@ import type {
 import { BRANDS, PLATFORM_NAME, PLUGIN_NAME, type BrandName } from './settings';
 import { NexiaClient, type NexiaClientOptions } from './nexia/client';
 import { ThermostatAccessory } from './thermostatAccessory';
+import { OutdoorSensorAccessory } from './outdoorSensorAccessory';
 
 export class TraneNexiaPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
@@ -20,7 +21,7 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
   private readonly pollMs: number;
   private pollTimer: NodeJS.Timeout | undefined;
   private stopping = false;
-  private readonly handlers: Map<string, ThermostatAccessory> = new Map();
+  private readonly handlers: Map<string, ThermostatAccessory | OutdoorSensorAccessory> = new Map();
 
   constructor(
     public readonly log: Logging,
@@ -107,10 +108,33 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
           handler = new ThermostatAccessory(this, accessory, this.nexia, t, z);
           this.handlers.set(uuid, handler);
         } else {
-          handler.update(t, z);
+          (handler as ThermostatAccessory).update(t, z);
         }
       }
     }
+
+    if (this.config.outdoorTemperatureSensor !== false) {
+      const source = house.items.find(t => t.has_outdoor_temperature && t.outdoor_temperature != null);
+      if (source) {
+        const uuid = this.api.hap.uuid.generate(`trane-nexia:v2:${house.id}:outdoor`);
+        seen.add(uuid);
+        let accessory = this.accessories.find(a => a.UUID === uuid);
+        if (!accessory) {
+          this.log.info('Adding accessory: Outdoor Temperature');
+          accessory = new this.api.platformAccessory('Outdoor Temperature', uuid);
+          this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+          this.accessories.push(accessory);
+        }
+        let handler = this.handlers.get(uuid);
+        if (!handler) {
+          handler = new OutdoorSensorAccessory(this, accessory, source);
+          this.handlers.set(uuid, handler);
+        } else {
+          (handler as OutdoorSensorAccessory).update(source);
+        }
+      }
+    }
+
     const stale = this.accessories.filter(a => !seen.has(a.UUID));
     if (stale.length) {
       for (const s of stale) {

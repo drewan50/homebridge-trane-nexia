@@ -49,6 +49,12 @@
         "maximum": 600,
         "description": "How often to poll Nexia for state. Lower = snappier Home app, more cloud requests."
       },
+      "outdoorTemperatureSensor": {
+        "title": "Outdoor temperature sensor",
+        "type": "boolean",
+        "default": true,
+        "description": "Expose the thermostat's outdoor temperature reading as a HomeKit temperature sensor."
+      },
       "appVersion": {
         "title": "X-AppVersion header (asair only)",
         "type": "string",
