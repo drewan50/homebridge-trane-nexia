@@ -1,0 +1,70 @@
+{
+  "pluginAlias": "TraneNexia",
+  "pluginType": "platform",
+  "singular": false,
+  "headerDisplay": "Exposes Trane / American Standard thermostats (XL824, XL850, XL950, XL1050) to Apple Home via the Nexia cloud API. One-time setup: log into your brand's web portal (tranehome.com / mynexia.com / asairhome.com), add a Mobile Device to get a 12-digit activation code, then run `npx nexia-activate <code>` to obtain the Mobile ID and API Key below. [Full instructions](https://github.com/drewan50/homebridge-trane-nexia#step-1--get-credentials).",
+  "footerDisplay": "Issues and feature requests: https://github.com/drewan50/homebridge-trane-nexia/issues",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Trane Nexia",
+        "required": true
+      },
+      "brand": {
+        "title": "Brand",
+        "type": "string",
+        "default": "trane",
+        "required": true,
+        "oneOf": [
+          { "title": "Trane Home (tranehome.com)", "enum": ["trane"] },
+          { "title": "Nexia (mynexia.com — legacy)", "enum": ["nexia"] },
+          { "title": "American Standard (asairhome.com)", "enum": ["asair"] }
+        ]
+      },
+      "mobileId": {
+        "title": "Mobile ID",
+        "type": "string",
+        "required": true,
+        "description": "Obtained by running `nexia-activate <activation_code>`."
+      },
+      "apiKey": {
+        "title": "API Key",
+        "type": "string",
+        "required": true,
+        "description": "Obtained alongside Mobile ID from the activation step."
+      },
+      "houseId": {
+        "title": "House ID",
+        "type": "string",
+        "description": "Optional. If empty, the plugin will discover it from the /session endpoint."
+      },
+      "pollInterval": {
+        "title": "Poll interval (seconds)",
+        "type": "integer",
+        "default": 30,
+        "minimum": 10,
+        "maximum": 600,
+        "description": "How often to poll Nexia for state. Lower = snappier Home app, more cloud requests."
+      },
+      "appVersion": {
+        "title": "X-AppVersion header (asair only)",
+        "type": "string",
+        "default": "6.1.0",
+        "condition": { "functionBody": "return model.brand === 'asair';" }
+      },
+      "apiUrl": {
+        "title": "API base URL override",
+        "type": "string",
+        "description": "Advanced. Leave blank to use the brand's default. Useful only if the vendor moves the host again."
+      },
+      "debug": {
+        "title": "Verbose debug logging",
+        "type": "boolean",
+        "default": false
+      }
+    }
+  }
+}

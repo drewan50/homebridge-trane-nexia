@@ -1,0 +1,56 @@
+{
+  "displayName": "Trane Nexia Thermostat",
+  "name": "homebridge-trane-nexia",
+  "version": "1.0.0",
+  "description": "Homebridge dynamic-platform plugin for Trane / American Standard thermostats (XL824, XL850, XL950, XL1050) via the Nexia cloud API",
+  "license": "MIT",
+  "author": "drewan50",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/drewan50/homebridge-trane-nexia.git"
+  },
+  "bugs": {
+    "url": "https://github.com/drewan50/homebridge-trane-nexia/issues"
+  },
+  "homepage": "https://github.com/drewan50/homebridge-trane-nexia#readme",
+  "main": "dist/index.js",
+  "bin": {
+    "nexia-activate": "bin/nexia-activate.js"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "homebridge": ">=1.8.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf ./dist",
+    "watch": "tsc -w",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "config.schema.json",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "homebridge-plugin",
+    "trane",
+    "nexia",
+    "american-standard",
+    "thermostat",
+    "xl824",
+    "xl850",
+    "xl950",
+    "xl1050",
+    "homekit"
+  ],
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "homebridge": "^1.8.0",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.4.0"
+  }
+}
