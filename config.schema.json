@@ -6,18 +6,17 @@
   "footerDisplay": "Issues and feature requests: https://github.com/drewan50/homebridge-trane-nexia/issues",
   "schema": {
     "type": "object",
+    "required": ["name", "brand", "mobileId", "apiKey"],
     "properties": {
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "Trane Nexia",
-        "required": true
+        "default": "Trane Nexia"
       },
       "brand": {
         "title": "Brand",
         "type": "string",
         "default": "trane",
-        "required": true,
         "oneOf": [
           { "title": "Trane Home (tranehome.com)", "enum": ["trane"] },
           { "title": "Nexia (mynexia.com — legacy)", "enum": ["nexia"] },
@@ -27,13 +26,11 @@
       "mobileId": {
         "title": "Mobile ID",
         "type": "string",
-        "required": true,
         "description": "Obtained by running `nexia-activate <activation_code>`."
       },
       "apiKey": {
         "title": "API Key",
         "type": "string",
-        "required": true,
         "description": "Obtained alongside Mobile ID from the activation step."
       },
       "houseId": {
