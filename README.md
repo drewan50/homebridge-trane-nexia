@@ -3,6 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/homebridge-trane-nexia)](https://www.npmjs.com/package/homebridge-trane-nexia)
 [![npm downloads](https://img.shields.io/npm/dt/homebridge-trane-nexia)](https://www.npmjs.com/package/homebridge-trane-nexia)
 [![license](https://img.shields.io/npm/l/homebridge-trane-nexia)](LICENSE)
+[![verified-by-homebridge](https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
 
 A [Homebridge](https://homebridge.io) dynamic-platform plugin that exposes **Trane** and **American Standard** thermostats to Apple Home via the Nexia cloud API.
 
