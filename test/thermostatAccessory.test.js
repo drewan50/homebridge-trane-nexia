@@ -13,7 +13,14 @@ const ux360 = () => clone(require('./fixtures/ux360-zoned-cool.json'));
 function build({ thermostat, zone, debug = false } = {}) {
   const { logs, log } = makeLog();
   const clock = { t: 1_000 };
-  const platform = { Service, Characteristic, log, debugEnabled: debug, now: () => clock.t, api: { hap: { HapStatusError, HAPStatus } } };
+  const timers = []; // what the accessory scheduled: { fn, ms, cancelled, fired }
+  const polls = { soon: 0 };
+  const platform = {
+    Service, Characteristic, log, debugEnabled: debug, now: () => clock.t,
+    schedule: (fn, ms) => { const timer = { fn, ms, cancelled: false, fired: false }; timers.push(timer); return () => { timer.cancelled = true; }; },
+    requestPollSoon: () => { polls.soon += 1; },
+    api: { hap: { HapStatusError, HAPStatus } },
+  };
   const accessory = makeAccessory();
   const calls = [];
   const nexia = {
@@ -24,11 +31,24 @@ function build({ thermostat, zone, debug = false } = {}) {
   const z = zone ?? t.zones[0];
   const acc = new ThermostatAccessory(platform, accessory, nexia, t, z);
   const svc = accessory.services.get(Service.Thermostat);
+  // Writes are queued and sent in the background. settle() plays out time: fire the timers the accessory asked for and let the sends finish.
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) {
+      for (const timer of timers) if (!timer.cancelled && !timer.fired) { timer.fired = true; timer.fn(); }
+      await new Promise(resolve => setImmediate(resolve));
+      if (!timers.some(timer => !timer.cancelled && !timer.fired) && !acc.writesPending()) return;
+    }
+    throw new Error('writes never settled');
+  };
+  const target = svc.char(Characteristic.TargetHeatingCoolingState);
+  const temp = svc.char(Characteristic.TargetTemperature);
+  const raw = { target: target.setter, temp: temp.setter }; // what HomeKit calls: must return at once
+  target.setter = async v => { raw.target(v); await settle(); }; // convenience: set, then let it be sent
+  temp.setter = async v => { raw.temp(v); await settle(); };
   return {
-    acc, svc, logs, calls, nexia, t, z, clock,
-    target: svc.char(Characteristic.TargetHeatingCoolingState),
+    acc, svc, logs, calls, nexia, t, z, clock, timers, polls, settle, raw,
+    target, temp,
     current: svc.char(Characteristic.CurrentHeatingCoolingState),
-    temp: svc.char(Characteristic.TargetTemperature),
   };
 }
 
@@ -106,7 +126,7 @@ test('debug: off logs nothing extra; on logs an info-level [debug] line once per
   assert.doesNotMatch(loud.logs.info.join('\n'), /apiKey|mobileId/i);
 });
 
-test('setting the mode: success updates the cache; failure logs and throws a HAP communication failure', async () => {
+test('setting the mode: success updates the cache; a failed write rolls back, logs, and asks for a poll', async () => {
   const ok = build();
   await ok.target.setter(Characteristic.TargetHeatingCoolingState.HEAT);
   assert.deepEqual(ok.calls, [['mode', 'HEAT']]);
@@ -114,12 +134,14 @@ test('setting the mode: success updates the cache; failure logs and throws a HAP
 
   const bad = build();
   bad.nexia.setZoneMode = async () => { throw new Error('HTTP 500'); };
-  await assert.rejects(bad.target.setter(Characteristic.TargetHeatingCoolingState.HEAT), isCommFailure);
+  await bad.target.setter(Characteristic.TargetHeatingCoolingState.HEAT); // HomeKit was answered; the failure comes later
   assert.equal(bad.logs.error.length, 1);
-  assert.equal(bad.target.getter(), Characteristic.TargetHeatingCoolingState.COOL, 'cache not changed by a failed write');
+  assert.match(bad.logs.error[0], /failed to set mode -> HEAT: HTTP 500/);
+  assert.equal(bad.target.getter(), Characteristic.TargetHeatingCoolingState.COOL, 'back to what Nexia last confirmed');
+  assert.equal(bad.polls.soon, 1, 'and a poll is requested to show the real state');
 });
 
-test('setting the temperature: moves the right setpoint, ignores OFF, fails visibly on a failed write', async () => {
+test('setting the temperature: moves the right setpoint, ignores OFF, rolls back on a failed write', async () => {
   const cool = build();
   await cool.temp.setter(24); // 75.2 F = the 75 F it already has
   assert.equal(cool.calls.length, 0, 'nothing changes, nothing is sent');
@@ -134,7 +156,10 @@ test('setting the temperature: moves the right setpoint, ignores OFF, fails visi
 
   const bad = build();
   bad.nexia.setSetpoints = async () => { throw new Error('HTTP 500'); };
-  await assert.rejects(bad.temp.setter(23), isCommFailure);
+  await bad.temp.setter(23);
+  assert.equal(bad.logs.error.length, 1);
+  assert.equal(bad.temp.getter(), 23.9, 'back to the 75 F Nexia last confirmed');
+  assert.equal(bad.polls.soon, 1);
 });
 
 // --- Added after the lead-engineer review (A3) ---
@@ -310,4 +335,139 @@ test('a temperature change while the thermostat is Off is ignored, and says so a
   await h.temp.setter(22);
   assert.equal(h.calls.length, 0);
   assert.ok(h.logs.info.some(l => /ignoring a temperature change/.test(l)), 'Homebridge drops log.debug, so this must be info');
+});
+
+// --- 1.1.4: write handlers answer HomeKit at once; the change is sent in the background ---
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const HEAT = Characteristic.TargetHeatingCoolingState.HEAT;
+const COOL = Characteristic.TargetHeatingCoolingState.COOL;
+
+test('1.1.4: a write handler returns at once; nothing is sent until the queue runs, and the Home app already shows the change', async () => {
+  const h = build();
+  const returned = h.raw.temp(23); // what HomeKit calls
+  assert.equal(returned, undefined, 'nothing for HAP to wait on: no promise, no slow-write warning');
+  assert.equal(h.calls.length, 0, 'nothing sent yet');
+  assert.deepEqual(h.timers.map(t => t.ms), [700], 'a short pause so a slider drag can finish');
+  assert.equal(h.temp.getter(), 22.8, '23 C is 73 F: the value that will be sent');
+  await h.settle();
+  assert.deepEqual(h.calls, [['setpoints', { cool: 73 }]]);
+  assert.equal(h.temp.getter(), 22.8);
+});
+
+test('1.1.4: a mode change is not held back by the pause', () => {
+  const h = build();
+  h.raw.target(HEAT);
+  assert.deepEqual(h.timers.map(t => t.ms), [0]);
+  assert.equal(h.target.getter(), HEAT, 'shown at once');
+  assert.equal(h.calls.length, 0);
+});
+
+test('1.1.4: a slider drag is merged: only the last value is sent, once', async () => {
+  const h = build();
+  for (const c of [21, 22, 23]) h.raw.temp(c);
+  assert.equal(h.timers.filter(t => !t.cancelled).length, 1, 'each change restarts the pause');
+  await h.settle();
+  assert.deepEqual(h.calls, [['setpoints', { cool: 73 }]]);
+});
+
+test('1.1.4: one request at a time; changes made while one is in flight are merged and sent after it', async () => {
+  const h = build();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const sent = [];
+  h.nexia.setSetpoints = async (z, payload) => { sent.push({ ...payload }); if (sent.length === 1) await gate; };
+
+  h.raw.temp(23);
+  h.timers[0].fired = true; h.timers[0].fn(); // the pause ends: the first request starts and hangs
+  await tick();
+  assert.deepEqual(sent, [{ cool: 73 }]);
+
+  h.raw.temp(24); h.raw.temp(25);            // more changes while it is in flight
+  for (const t of h.timers) if (!t.cancelled && !t.fired) { t.fired = true; t.fn(); }
+  await tick();
+  assert.equal(sent.length, 1, 'the second request waits for the first');
+  assert.equal(h.temp.getter(), 25, 'but the Home app shows the latest');
+
+  release();
+  await h.settle();
+  assert.deepEqual(sent, [{ cool: 73 }, { cool: 77 }], '24 was merged into 25');
+});
+
+test('1.1.4: changes are sent in the order they were made, and a temperature keeps the mode it was made under', async () => {
+  const h = build(); // COOL, heat 68, cool 75
+  h.raw.temp(23);    // a cooling target
+  h.raw.target(HEAT); // then the user switches to heat before it is sent
+  await h.settle();
+  assert.deepEqual(h.calls, [['setpoints', { cool: 73 }], ['mode', 'HEAT']]);
+  assert.equal(h.z.heating_setpoint, 68, 'the cooling target never touched the heat setpoint');
+});
+
+test('1.1.4: a mode change takes effect locally at once, so a temperature made right after sees the new mode', async () => {
+  const h = build({ thermostat: withZone((t, z) => { z.current_zone_mode = 'OFF'; }) });
+  h.raw.target(HEAT);
+  h.raw.temp(22); // would be ignored if the thermostat still looked Off
+  await h.settle();
+  assert.deepEqual(h.calls, [['mode', 'HEAT'], ['setpoints', { heat: 72 }]]);
+});
+
+test('1.1.4: a poll that arrives while a change is waiting or in flight is ignored, so the tile does not flicker', async () => {
+  const h = build();
+  h.clock.t = 5_000;
+  h.raw.temp(23);
+  const stale = xl824(); // still says cool 75
+  h.acc.update(stale, stale.zones[0], 6_000); // started after the change, before it was sent
+  assert.equal(h.temp.getter(), 22.8);
+  assert.ok(h.logs.debug.some(l => /ignoring a poll while a change is being sent/.test(l)));
+  await h.settle();
+
+  const fresh = xl824();
+  fresh.zones[0].cooling_setpoint = 73;
+  h.clock.t = 7_000;
+  h.acc.update(fresh, fresh.zones[0], 7_001);
+  assert.equal(h.temp.getter(), 22.8, 'polls are applied again once nothing is pending');
+});
+
+test('1.1.4: a failed write drops what was queued behind it, puts the tile back, logs once and asks for a poll', async () => {
+  const h = build();
+  h.nexia.setZoneMode = async () => { throw new Error('HTTP 502'); };
+  h.raw.target(HEAT);
+  h.raw.temp(22);
+  await h.settle();
+  assert.deepEqual(h.calls, [], 'the temperature queued behind the failed mode change was not sent');
+  assert.equal(h.target.getter(), COOL);
+  assert.equal(h.temp.getter(), 23.9, '75 F, as Nexia last confirmed');
+  assert.equal(h.logs.error.length, 1);
+  assert.equal(h.polls.soon, 1);
+
+  h.nexia.setZoneMode = async (z, mode) => { h.calls.push(['mode', mode]); };
+  await h.target.setter(HEAT);
+  assert.deepEqual(h.calls, [['mode', 'HEAT']], 'the queue works again after a failure');
+});
+
+test('1.1.4: if the temperature fails after the mode went through, the mode stays and only the temperature rolls back', async () => {
+  const h = build();
+  h.nexia.setSetpoints = async () => { throw new Error('HTTP 500'); };
+  h.raw.target(HEAT);
+  h.raw.temp(22);
+  await h.settle();
+  assert.deepEqual(h.calls, [['mode', 'HEAT']]);
+  assert.equal(h.target.getter(), HEAT, 'the confirmed mode is kept');
+  assert.equal(h.temp.getter(), 20, 'the 68 F heat setpoint, not the 22 C that was asked for');
+  assert.equal(h.logs.error.length, 1);
+  assert.equal(h.polls.soon, 1);
+});
+
+test('1.1.4: a change that can never work still fails in the handler itself, immediately', () => {
+  const t = xl824();
+  delete t.zones[0].current_zone_mode;
+  const h = build({ thermostat: t });
+  assert.throws(() => h.raw.temp(22), isCommFailure, 'unknown mode');
+
+  const none = xl824();
+  none.zones[0].heating_setpoint = null; none.zones[0].cooling_setpoint = null; delete none.zones[0].setpoints;
+  assert.throws(() => build({ thermostat: none }).raw.temp(22), isCommFailure, 'no readable setpoint');
+
+  const limits = withZone((t2, z) => { z.features[0].setpoint_heat_min = 70; z.features[0].setpoint_cool_max = 71; z.current_zone_mode = 'AUTO'; });
+  assert.throws(() => build({ thermostat: limits }).raw.temp(21), isCommFailure, 'no valid heat/cool pair inside the limits');
+  assert.equal(h.timers.length, 0, 'and nothing was queued');
 });

@@ -13,6 +13,13 @@ import {
 } from './nexia/zoneState';
 import type { TraneNexiaPlatform } from './platform';
 
+/** How long a temperature change waits for the next one before it is sent (dragging the slider sends many). */
+const WRITE_DEBOUNCE_MS = 700;
+
+type WriteOp =
+  | { kind: 'mode'; mode: ZoneMode }
+  | { kind: 'target'; targetC: number; mode: ZoneMode }; // the mode it was made under, so a later mode change can't re-aim it
+
 const fToC = (f: number): number => Math.round(((f - 32) * (5 / 9)) * 10) / 10;
 const cToF = (c: number): number => Math.round(c * (9 / 5) + 32);
 
@@ -30,8 +37,14 @@ export class ThermostatAccessory {
   private warnedModeKey: string | undefined; // undefined until the first warning, so an empty payload still warns
   private warnedScale = false;
   private lastSummary = '';
-  // When our last write finished. A poll that started before then is stale and must not undo the write.
+  // When our last write was made or finished. A poll that started before then is stale and must not undo the write.
   private lastWriteAt = 0;
+  // Writes (see "Writes" below): changes the Home app has made that Nexia doesn't know about yet.
+  private readonly queue: WriteOp[] = [];
+  private flushing = false;
+  private cancelFlush: (() => void) | undefined;
+  private targetOverrideC: number | undefined; // what the Home app should show as the target until the queued change is sent
+  private confirmedMode: { zoneMode: string | undefined; lastMode: ZoneMode | undefined } | undefined; // the mode Nexia last confirmed
 
   constructor(
     private readonly platform: TraneNexiaPlatform,
@@ -98,6 +111,11 @@ export class ThermostatAccessory {
   update(thermostat: Thermostat, zone: Zone, polledAt?: number): void {
     if (polledAt !== undefined && polledAt < this.lastWriteAt) {
       this.platform.log.debug(`[${this.displayName()}] ignoring a poll that started before the last change was applied`);
+      return;
+    }
+    if (this.writesPending()) {
+      // A poll now would show the thermostat as it was before our change and make the tile jump back and forth.
+      this.platform.log.debug(`[${this.displayName()}] ignoring a poll while a change is being sent`);
       return;
     }
     this.thermostat = thermostat;
@@ -251,6 +269,7 @@ export class ThermostatAccessory {
   /** The temperature the Home app should show as the target, in °C, or undefined when the thermostat
    *  gave us no usable setpoint and we never had one (never a made-up number). */
   private targetTempOrUndefined(): number | undefined {
+    if (this.targetOverrideC !== undefined) return this.targetOverrideC; // a change is queued: show what the user asked for
     const { heat, cool } = resolveSetpoints(this.zone);
     let raw: number | null;
     switch (this.currentMode()) {
@@ -313,28 +332,29 @@ export class ThermostatAccessory {
     return h;
   }
 
-  private async setTargetState(value: CharacteristicValue): Promise<void> {
+  // ---- Writes -------------------------------------------------------------------------------------------------
+  // A write handler must answer HomeKit quickly: Homebridge warns after 3 s ("This plugin slows down Homebridge")
+  // and gives up after 9 s, and a round trip from the cloud to the thermostat can take that long. So onSet only
+  // validates, applies the change locally (the Home app shows it at once) and queues it; the request goes to Nexia in
+  // the background. Changes are sent one at a time, in the order they were made; consecutive temperature changes
+  // (dragging the slider) are merged so only the last is sent. If a request fails, the Home app is put back to what
+  // Nexia last confirmed, the error is logged, and a poll is requested to show the real state.
+
+  private setTargetState(value: CharacteristicValue): void {
     const { Characteristic } = this.platform;
     let mode: ZoneMode = 'OFF';
     if (value === Characteristic.TargetHeatingCoolingState.HEAT) mode = 'HEAT';
     else if (value === Characteristic.TargetHeatingCoolingState.COOL) mode = 'COOL';
     else if (value === Characteristic.TargetHeatingCoolingState.AUTO) mode = 'AUTO';
     this.platform.log.info(`[${this.displayName()}] set mode -> ${mode}`);
-    try {
-      await this.nexia.setZoneMode(this.zone, mode, this.thermostat.id);
-      this.zone.current_zone_mode = mode;
-      this.lastMode = mode;
-      this.lastWriteAt = this.platform.now();
-    } catch (e) {
-      this.platform.log.error(`[${this.displayName()}] failed to set mode -> ${mode}:`, (e as Error).message);
-      throw this.commFailure();
-    }
-    // The setpoint the Home app should show depends on the mode (heat in HEAT, cool in COOL): don't wait for the next poll.
-    const shown = this.targetTempOrUndefined();
-    if (shown !== undefined) this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, shown);
+    this.rememberConfirmedMode();
+    // Take effect locally now, so a temperature change made right after this one sees the new mode.
+    this.zone.current_zone_mode = mode;
+    this.lastMode = mode;
+    this.enqueue({ kind: 'mode', mode }, 0);
   }
 
-  private async setTargetTemp(value: CharacteristicValue): Promise<void> {
+  private setTargetTemp(value: CharacteristicValue): void {
     const mode = this.currentMode();
     if (mode === 'OFF') {
       this.platform.log.info(`[${this.displayName()}] ignoring a temperature change: the thermostat is Off`);
@@ -351,38 +371,143 @@ export class ThermostatAccessory {
       this.platform.log.error(`[${this.displayName()}] cannot change the temperature: the thermostat reported no readable setpoints (see the [debug] line).`);
       throw this.commFailure();
     }
-    const native = this.fromCelsius(Number(value));
-    const f = this.thermostatFeature();
-    let payload: SetpointPlan;
+    const targetC = Number(value);
     try {
-      if (!Number.isFinite(native)) throw new RangeError(`the requested temperature ${String(value)} is not a number`);
-      payload = planSetpoints({
-        mode,
-        target: native,
-        heat,
-        cool,
-        deadband: finiteOrNull(f?.setpoint_delta) ?? finiteOrNull(this.thermostat.delta) ?? 2,
-        min: finiteOrNull(f?.setpoint_heat_min),
-        max: finiteOrNull(f?.setpoint_cool_max),
-      });
+      this.planTarget(mode, targetC); // a change that can never work fails in the Home app straight away
     } catch (e) {
       this.platform.log.error(`[${this.displayName()}] refusing to send a temperature change: ${(e as Error).message}`);
       throw this.commFailure();
     }
+    // Show the value that will really be sent (23 C is 73 F, which reads 22.8 C), so the tile doesn't jump when it is.
+    this.targetOverrideC = this.toCelsius(this.fromCelsius(targetC));
+    this.enqueue({ kind: 'target', targetC, mode }, WRITE_DEBOUNCE_MS);
+  }
+
+  /** What to send for a change to `targetC` made in `mode`, from the setpoints Nexia last confirmed. Throws a RangeError
+   *  when no valid heat/cool pair exists. An empty plan means the thermostat is already there. */
+  private planTarget(mode: 'HEAT' | 'COOL' | 'AUTO', targetC: number): SetpointPlan {
+    const { heat, cool } = resolveSetpoints(this.zone);
+    const native = this.fromCelsius(targetC);
+    if (!Number.isFinite(native)) throw new RangeError(`the requested temperature ${String(targetC)} is not a number`);
+    const f = this.thermostatFeature();
+    return planSetpoints({
+      mode,
+      target: native,
+      heat,
+      cool,
+      deadband: finiteOrNull(f?.setpoint_delta) ?? finiteOrNull(this.thermostat.delta) ?? 2,
+      min: finiteOrNull(f?.setpoint_heat_min),
+      max: finiteOrNull(f?.setpoint_cool_max),
+    });
+  }
+
+  private writesPending(): boolean {
+    return this.queue.length > 0 || this.flushing || this.cancelFlush !== undefined;
+  }
+
+  private rememberConfirmedMode(): void {
+    if (!this.writesPending() && !this.confirmedMode) {
+      this.confirmedMode = { zoneMode: this.zone.current_zone_mode, lastMode: this.lastMode };
+    }
+  }
+
+  private enqueue(op: WriteOp, delayMs: number): void {
+    this.rememberConfirmedMode();
+    this.lastWriteAt = this.platform.now();
+    const last = this.queue[this.queue.length - 1];
+    if (last && last.kind === 'target' && op.kind === 'target' && last.mode === op.mode) {
+      this.queue[this.queue.length - 1] = op; // merge: only the latest of a run of temperature changes is sent
+    } else {
+      this.queue.push(op);
+    }
+    this.cancelFlush?.();
+    this.cancelFlush = this.platform.schedule(() => {
+      this.cancelFlush = undefined;
+      this.flush().catch(e => this.platform.log.error(`[${this.displayName()}] unexpected error while sending a change: ${(e as Error).message}`));
+    }, delayMs);
+  }
+
+  private async flush(): Promise<void> {
+    if (this.flushing) return; // the running loop takes whatever was queued meanwhile
+    this.flushing = true;
+    try {
+      while (this.queue.length > 0) {
+        const op = this.queue.shift() as WriteOp;
+        const ok = op.kind === 'mode' ? await this.sendMode(op.mode) : await this.sendTarget(op.targetC, op.mode);
+        if (!ok) break; // rolled back; everything queued after it is dropped by rollBack()
+      }
+    } finally {
+      this.flushing = false;
+      if (this.queue.length === 0) this.confirmedMode = undefined;
+    }
+  }
+
+  private async sendMode(mode: ZoneMode): Promise<boolean> {
+    try {
+      await this.nexia.setZoneMode(this.zone, mode, this.thermostat.id);
+    } catch (e) {
+      this.platform.log.error(`[${this.displayName()}] failed to set mode -> ${mode}: ${(e as Error).message}. Showing the thermostat's real state again.`);
+      this.rollBack();
+      return false;
+    }
+    this.confirmedMode = { zoneMode: mode, lastMode: mode };
+    this.lastWriteAt = this.platform.now();
+    this.refreshTarget(); // the setpoint shown depends on the mode (heat in HEAT, cool in COOL)
+    return true;
+  }
+
+  private async sendTarget(targetC: number, mode: ZoneMode): Promise<boolean> {
+    if (mode === 'OFF') return this.finishTarget(); // can't happen (validated), but never send a setpoint for Off
+    let payload: SetpointPlan;
+    try {
+      payload = this.planTarget(mode, targetC);
+    } catch (e) {
+      this.platform.log.error(`[${this.displayName()}] not sending the temperature change: ${(e as Error).message}`);
+      this.rollBack();
+      return false;
+    }
     if (payload.heat === undefined && payload.cool === undefined) {
       this.platform.log.info(`[${this.displayName()}] already set to that temperature; nothing to send`);
-      return;
+      return this.finishTarget();
     }
     this.platform.log.info(`[${this.displayName()}] set setpoints ${JSON.stringify(payload)} (native ${this.nativeScale()})`);
     try {
       await this.nexia.setSetpoints(this.zone, payload, this.thermostat.id);
     } catch (e) {
-      this.platform.log.error(`[${this.displayName()}] failed to set setpoints ${JSON.stringify(payload)}:`, (e as Error).message);
-      throw this.commFailure();
+      this.platform.log.error(`[${this.displayName()}] failed to set setpoints ${JSON.stringify(payload)}: ${(e as Error).message}. Showing the thermostat's real state again.`);
+      this.rollBack();
+      return false;
     }
     if (payload.heat !== undefined) this.zone.heating_setpoint = payload.heat;
     if (payload.cool !== undefined) this.zone.cooling_setpoint = payload.cool;
     this.lastWriteAt = this.platform.now();
+    return this.finishTarget();
+  }
+
+  /** A queued temperature change is done (sent, or nothing to send): stop overriding what the Home app shows, unless a
+   *  newer temperature change is still waiting. */
+  private finishTarget(): boolean {
+    if (!this.queue.some(op => op.kind === 'target')) this.targetOverrideC = undefined;
+    this.refreshTarget();
+    return true;
+  }
+
+  /** A change could not be sent. Drop what was queued behind it, put the Home app back to what Nexia last confirmed, and
+   *  ask for a poll so the real state shows even if the write got through. */
+  private rollBack(): void {
+    this.queue.length = 0;
+    this.targetOverrideC = undefined;
+    if (this.confirmedMode) {
+      this.zone.current_zone_mode = this.confirmedMode.zoneMode;
+      this.lastMode = this.confirmedMode.lastMode;
+    }
+    const mode = this.currentMode();
+    if (mode) this.service.updateCharacteristic(this.platform.Characteristic.TargetHeatingCoolingState, this.hapTargetState(mode));
+    this.refreshTarget();
+    this.platform.requestPollSoon();
+  }
+
+  private refreshTarget(): void {
     const shown = this.targetTempOrUndefined();
     if (shown !== undefined) this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, shown);
   }

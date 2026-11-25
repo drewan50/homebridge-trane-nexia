@@ -15,6 +15,16 @@ import type {
  *  stalls polling (and a pending HomeKit write) for minutes. */
 export const REQUEST_TIMEOUT_MS = 15_000;
 
+/** One retry after a DNS failure waits this long. */
+export const DNS_RETRY_DELAY_MS = 1_000;
+
+/** The name of the host could not be looked up (EAI_AGAIN is "temporary failure in name resolution", common on a NAS whose
+ *  resolver hiccups). Nothing was connected to, let alone sent, so repeating the request cannot do anything twice. */
+function isNameResolutionFailure(e: unknown): boolean {
+  const code = (e as { cause?: { code?: string } } | undefined)?.cause?.code;
+  return code === 'EAI_AGAIN' || code === 'ENOTFOUND';
+}
+
 /** A non-2xx answer from Nexia. `status` lets callers tell "your key was rejected" from "Nexia is down". */
 export class NexiaHttpError extends Error {
   constructor(readonly status: number, message: string) {
@@ -34,19 +44,21 @@ export interface NexiaClientOptions {
   debug?: boolean;
   /** Per-request limit in milliseconds; defaults to REQUEST_TIMEOUT_MS. Exposed so tests don't wait 15 s. */
   timeoutMs?: number;
+  /** Pause before the single retry after a DNS lookup failure; defaults to DNS_RETRY_DELAY_MS. */
+  retryDelayMs?: number;
 }
 
 type Method = 'GET' | 'POST' | 'PUT';
 interface Action { href: string; method: 'POST' | 'PUT' }
 
-function describeFetchError(method: string, url: string, e: unknown, timeoutMs: number): Error {
+function describeFetchError(method: string, url: string, e: unknown, timeoutMs: number, retried = false): Error {
   const err = e as { name?: string; message?: string; cause?: { code?: string; message?: string } };
   if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
     return new Error(`Nexia ${method} ${url} timed out after ${timeoutMs / 1000}s`);
   }
   // undici reports every network failure as "fetch failed"; the useful part is on `cause` (ENOTFOUND, ECONNRESET, ...).
   const cause = err?.cause?.code ?? err?.cause?.message;
-  return new Error(`Nexia ${method} ${url} failed: ${err?.message ?? String(e)}${cause ? ` (${cause})` : ''}`);
+  return new Error(`Nexia ${method} ${url} failed: ${err?.message ?? String(e)}${cause ? ` (${cause})` : ''}${retried ? ' after one retry' : ''}`);
 }
 
 export class NexiaClient {
@@ -112,18 +124,27 @@ export class NexiaClient {
   private async request<T>(method: Method, pathOrUrl: string, body?: unknown): Promise<T> {
     const url = this.url(pathOrUrl);
     this.log(method, url, body ?? '');
+    const timeoutMs = this.options.timeoutMs ?? REQUEST_TIMEOUT_MS;
     let res: Response;
     let text: string;
-    try {
-      res = await fetch(url, {
-        method,
-        headers: this.headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(this.options.timeoutMs ?? REQUEST_TIMEOUT_MS),
-      });
-      text = await res.text();
-    } catch (e) {
-      throw describeFetchError(method, url, e, this.options.timeoutMs ?? REQUEST_TIMEOUT_MS);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        res = await fetch(url, {
+          method,
+          headers: this.headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        text = await res.text();
+        break;
+      } catch (e) {
+        if (attempt === 0 && isNameResolutionFailure(e)) {
+          this.log(`${method} ${url}: name lookup failed, retrying once`);
+          await new Promise<void>(resolve => setTimeout(resolve, this.options.retryDelayMs ?? DNS_RETRY_DELAY_MS));
+          continue;
+        }
+        throw describeFetchError(method, url, e, timeoutMs, attempt > 0);
+      }
     }
     if (!res.ok) {
       throw new NexiaHttpError(res.status, `Nexia ${method} ${url} -> HTTP ${res.status} ${res.statusText}: ${text.slice(0, 400)}`);

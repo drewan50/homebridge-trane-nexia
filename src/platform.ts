@@ -25,6 +25,8 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
   private readonly pollMs: number;
   private pollTimer: NodeJS.Timeout | undefined;
   private stopping = false;
+  private pollingEnabled = false; // set once the poller has started (credentials present)
+  private polling = false; // a poll is in flight
   private readonly handlers: Map<string, ThermostatAccessory | OutdoorSensorAccessory> = new Map();
   // Accessories the last polls did not report, so a vendor glitch can't make us unregister them.
   private readonly missing: Map<string, { since: number; polls: number }> = new Map();
@@ -86,11 +88,13 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
       return;
     }
     this.log.info(`Starting Nexia poller against ${this.nexia.baseUrl} every ${this.pollMs / 1000}s`);
+    this.pollingEnabled = true;
     this.scheduleNextPoll(0);
   }
 
   private scheduleNextPoll(delayMs: number): void {
     if (this.stopping) return;
+    if (this.pollTimer) clearTimeout(this.pollTimer); // there is only ever one poll chain
     this.pollTimer = setTimeout(() => {
       void this.pollOnce().then(next => this.scheduleNextPoll(next));
     }, delayMs);
@@ -101,6 +105,7 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
    *  is then reminded about every 10th time, and recovery is logged once, so an outage or a revoked key
    *  doesn't write thousands of identical lines. */
   async pollOnce(): Promise<number> {
+    this.polling = true;
     try {
       await this.refresh();
       if (this.failures > 0) this.log.info(`Nexia is reachable again after ${this.failures} failed poll${this.failures === 1 ? '' : 's'}.`);
@@ -120,7 +125,25 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
       }
       this.lastFailureMessage = message;
       return nextPollDelayMs(this.pollMs, this.failures, authFailure);
+    } finally {
+      this.polling = false;
     }
+  }
+
+  /** Run `fn` after `ms`; returns a function that cancels it. A method so tests can drive time. The timer
+   *  doesn't keep Homebridge alive on shutdown. */
+  schedule(fn: () => void, ms: number): () => void {
+    const timer = setTimeout(fn, ms);
+    timer.unref?.();
+    return () => clearTimeout(timer);
+  }
+
+  /** Poll again in about a second instead of waiting out the interval: used after a failed write, to show the
+   *  thermostat's real state. Does nothing before the poller starts, after shutdown, or while a poll is already
+   *  running (that one schedules the next on its own). */
+  requestPollSoon(): void {
+    if (!this.pollingEnabled || this.stopping || this.polling) return;
+    this.scheduleNextPoll(1000);
   }
 
   private stop(): void {
