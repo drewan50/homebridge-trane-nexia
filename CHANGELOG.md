@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-25
+
 ### Fixed
 
 - A thermostat whose mode is not in `current_zone_mode` (reported for the American Standard UX360, [#1](https://github.com/drewan50/homebridge-trane-nexia/issues/1)) no longer shows as "Off" in the Home app. The mode is now also read from the zone's `settings`, the thermostat's `system_mode`, the `thermostat_mode` feature and the thermostat's `mode`, in the order the Home Assistant Nexia library uses. If no readable mode exists, the Home app keeps the last known mode, or shows "No Response" if there never was one, and the log says which fields it saw. It no longer pretends the thermostat is Off. This is unverified against a real UX360 payload.
