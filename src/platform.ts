@@ -27,6 +27,7 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
   private stopping = false;
   private pollingEnabled = false; // set once the poller has started (credentials present)
   private polling = false; // a poll is in flight
+  private pollSoonRequested = false; // a write failed while a poll was in flight: poll again right after it
   private readonly handlers: Map<string, ThermostatAccessory | OutdoorSensorAccessory> = new Map();
   // Accessories the last polls did not report, so a vendor glitch can't make us unregister them.
   private readonly missing: Map<string, { since: number; polls: number }> = new Map();
@@ -96,7 +97,7 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
     if (this.stopping) return;
     if (this.pollTimer) clearTimeout(this.pollTimer); // there is only ever one poll chain
     this.pollTimer = setTimeout(() => {
-      void this.pollOnce().then(next => this.scheduleNextPoll(next));
+      void this.pollOnce().then(next => this.scheduleNextPoll(this.afterPoll(next)));
     }, delayMs);
   }
 
@@ -142,12 +143,29 @@ export class TraneNexiaPlatform implements DynamicPlatformPlugin {
    *  thermostat's real state. Does nothing before the poller starts, after shutdown, or while a poll is already
    *  running (that one schedules the next on its own). */
   requestPollSoon(): void {
-    if (!this.pollingEnabled || this.stopping || this.polling) return;
+    // While Nexia is failing the backoff decides when to try again; a failed write must not cut it short.
+    if (!this.pollingEnabled || this.stopping || this.failures > 0) return;
+    if (this.polling) {
+      // That poll may have started before the change, so its result can be thrown away: ask for another right after it.
+      this.pollSoonRequested = true;
+      return;
+    }
     this.scheduleNextPoll(1000);
+  }
+
+  /** How long to wait after a poll: the usual delay, or about a second if a failed write asked for a fresh read meanwhile. */
+  private afterPoll(next: number): number {
+    if (!this.pollSoonRequested) return next;
+    this.pollSoonRequested = false;
+    return this.failures > 0 ? next : Math.min(next, 1000);
   }
 
   private stop(): void {
     this.stopping = true;
+    // A change still waiting out its pause would be lost: send it now (best effort; Homebridge exits shortly after).
+    for (const handler of this.handlers.values()) {
+      if (handler instanceof ThermostatAccessory) void handler.flushPendingWrites();
+    }
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
       this.pollTimer = undefined;

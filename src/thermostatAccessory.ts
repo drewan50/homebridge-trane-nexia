@@ -405,8 +405,10 @@ export class ThermostatAccessory {
     return this.queue.length > 0 || this.flushing || this.cancelFlush !== undefined;
   }
 
+  /** Remember the mode Nexia last confirmed, before the first unconfirmed change touches it. Once taken it stays until every
+   *  queued change has been sent (the end of flush), and sendMode moves it forward as modes are confirmed. */
   private rememberConfirmedMode(): void {
-    if (!this.writesPending() && !this.confirmedMode) {
+    if (!this.confirmedMode) {
       this.confirmedMode = { zoneMode: this.zone.current_zone_mode, lastMode: this.lastMode };
     }
   }
@@ -423,15 +425,35 @@ export class ThermostatAccessory {
     this.cancelFlush?.();
     this.cancelFlush = this.platform.schedule(() => {
       this.cancelFlush = undefined;
-      this.flush().catch(e => this.platform.log.error(`[${this.displayName()}] unexpected error while sending a change: ${(e as Error).message}`));
+      this.flush().catch(e => this.abandonWrites(e));
     }, delayMs);
+  }
+
+  /** Called on shutdown: send what is waiting now instead of after its pause. Best effort: Homebridge exits soon after. */
+  flushPendingWrites(): Promise<void> {
+    this.cancelFlush?.();
+    this.cancelFlush = undefined;
+    return this.flush().catch(e => this.abandonWrites(e));
+  }
+
+  /** The queue failed in a way nothing anticipated. Never leave it stuck: that would ignore every poll from then on. */
+  private abandonWrites(e: unknown): void {
+    this.platform.log.error(`[${this.displayName()}] unexpected error while sending a change: ${(e as Error).message}`);
+    try {
+      this.rollBack();
+    } catch {
+      this.queue.length = 0; // the next poll puts the Home app right
+      this.targetOverrideC = undefined;
+    }
   }
 
   private async flush(): Promise<void> {
     if (this.flushing) return; // the running loop takes whatever was queued meanwhile
     this.flushing = true;
     try {
-      while (this.queue.length > 0) {
+      // Stop when a pause is running: that change (and anything merged into it) is sent when its own pause ends, so a slider drag
+      // that overlaps the end of a request still sends only its last value.
+      while (this.queue.length > 0 && this.cancelFlush === undefined) {
         const op = this.queue.shift() as WriteOp;
         const ok = op.kind === 'mode' ? await this.sendMode(op.mode) : await this.sendTarget(op.targetC, op.mode);
         if (!ok) break; // rolled back; everything queued after it is dropped by rollBack()

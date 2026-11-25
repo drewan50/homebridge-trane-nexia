@@ -134,6 +134,9 @@ export class NexiaClient {
           headers: this.headers,
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: AbortSignal.timeout(timeoutMs),
+          // Never follow a redirect: fetch would repeat a POST at the new address, and would carry the Mobile ID / API Key
+          // headers to whatever host it points at. No Nexia mobile endpoint redirects (checked for all three brands).
+          redirect: 'error',
         });
         text = await res.text();
         break;
@@ -246,6 +249,7 @@ export class NexiaClient {
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ activation_code: activationCode }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        redirect: 'error',
       });
       text = await res.text();
     } catch (e) {

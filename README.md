@@ -264,7 +264,7 @@ The plugin could not tell which mode that thermostat is in (the Nexia response h
 
 Since 1.1.4 the Home app is answered immediately and the change is sent to Nexia in the background: a round trip from Nexia's cloud to the thermostat can take several seconds, and Homebridge warns about plugins that make the Home app wait. If Nexia can't be reached or rejects the change, the tile returns to what the thermostat last reported, the Homebridge log has an error such as `failed to set setpoints {...}`, and the plugin re-reads the thermostat a moment later. Changes made in quick succession (dragging the slider) are combined, so only the last value is sent.
 
-If this happens often, check that the machine running Homebridge can resolve and reach `www.tranehome.com`. An `EAI_AGAIN` in the log is a DNS problem on that machine, not on Nexia's side.
+Nexia is given up to 15 seconds per attempt, and one more attempt after a DNS failure, so a failure can show up to about half a minute after you made the change; until then the tile shows the new value. If this happens often, check that the machine running Homebridge can resolve and reach `www.tranehome.com`. An `EAI_AGAIN` in the log is a DNS problem on that machine, not on Nexia's side.
 
 ### Temperatures only update every 30 seconds
 

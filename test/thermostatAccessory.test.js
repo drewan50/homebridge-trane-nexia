@@ -421,10 +421,10 @@ test('1.1.4: a poll that arrives while a change is waiting or in flight is ignor
   await h.settle();
 
   const fresh = xl824();
-  fresh.zones[0].cooling_setpoint = 73;
+  fresh.zones[0].cooling_setpoint = 72; // someone changed it on the wall meanwhile: a value different from the local 73
   h.clock.t = 7_000;
   h.acc.update(fresh, fresh.zones[0], 7_001);
-  assert.equal(h.temp.getter(), 22.8, 'polls are applied again once nothing is pending');
+  assert.equal(h.temp.getter(), 22.2, 'polls are applied again once nothing is pending');
 });
 
 test('1.1.4: a failed write drops what was queued behind it, puts the tile back, logs once and asks for a poll', async () => {
@@ -460,14 +460,167 @@ test('1.1.4: if the temperature fails after the mode went through, the mode stay
 test('1.1.4: a change that can never work still fails in the handler itself, immediately', () => {
   const t = xl824();
   delete t.zones[0].current_zone_mode;
-  const h = build({ thermostat: t });
-  assert.throws(() => h.raw.temp(22), isCommFailure, 'unknown mode');
+  const unknownMode = build({ thermostat: t });
+  assert.throws(() => unknownMode.raw.temp(22), isCommFailure, 'unknown mode');
 
   const none = xl824();
   none.zones[0].heating_setpoint = null; none.zones[0].cooling_setpoint = null; delete none.zones[0].setpoints;
-  assert.throws(() => build({ thermostat: none }).raw.temp(22), isCommFailure, 'no readable setpoint');
+  const noSetpoints = build({ thermostat: none });
+  assert.throws(() => noSetpoints.raw.temp(22), isCommFailure, 'no readable setpoint');
 
   const limits = withZone((t2, z) => { z.features[0].setpoint_heat_min = 70; z.features[0].setpoint_cool_max = 71; z.current_zone_mode = 'AUTO'; });
-  assert.throws(() => build({ thermostat: limits }).raw.temp(21), isCommFailure, 'no valid heat/cool pair inside the limits');
-  assert.equal(h.timers.length, 0, 'and nothing was queued');
+  const noPair = build({ thermostat: limits });
+  assert.throws(() => noPair.raw.temp(21), isCommFailure, 'no valid heat/cool pair inside the limits');
+
+  for (const h of [unknownMode, noSetpoints, noPair]) assert.equal(h.timers.length, 0, 'and nothing was queued');
+});
+
+// --- Added after the lead-engineer review of PR #5 ---
+const fire = timer => { timer.fired = true; timer.fn(); };
+const updatesOf = (h, characteristic) => h.svc.updates.filter(([c]) => c === characteristic).map(([, v]) => v);
+const deferred = () => { let release; const gate = new Promise(resolve => { release = resolve; }); return { gate, release }; };
+
+test('review M1: a failed mode change rolls back even when the previous batch ended while another change was still pausing', async () => {
+  const h = build();
+  const { gate, release } = deferred();
+  let sends = 0;
+  h.nexia.setSetpoints = async () => { sends += 1; if (sends === 1) await gate; };
+  h.nexia.setZoneMode = async () => { throw new Error('HTTP 502'); };
+
+  h.raw.temp(23);
+  fire(h.timers[0]); await tick(); // the first request is in flight
+  h.raw.temp(24);                  // queued behind it, its pause still running
+  release(); await tick(); await tick();
+  h.raw.target(HEAT);              // the user now switches to heat, and that write fails
+  await h.settle();
+
+  assert.equal(h.target.getter(), COOL, 'the thermostat is still in COOL, so the tile must say COOL');
+  assert.equal(updatesOf(h, Characteristic.TargetHeatingCoolingState).at(-1), COOL, 'and the Home app was told');
+  assert.equal(h.polls.soon, 1);
+});
+
+test('review S1: changes made while a request is in flight keep their pause, so a drag sends only its first and last values', async () => {
+  const h = build();
+  const first = deferred();
+  const second = deferred();
+  const sent = [];
+  h.nexia.setSetpoints = async (z, payload) => {
+    sent.push({ ...payload });
+    if (sent.length === 1) await first.gate;
+    if (sent.length === 2) await second.gate;
+  };
+
+  h.raw.temp(21);
+  fire(h.timers[0]); await tick();     // request 1 is in flight
+  h.raw.temp(22);                      // queued behind it, its pause running
+  first.release(); await tick(); await tick(); // request 1 ends while 22 is still pausing
+  for (const c of [23, 24]) h.raw.temp(c);     // the drag carries on
+  second.release();
+  await h.settle();
+  assert.deepEqual(sent, [{ cool: 70, heat: 67 }, { cool: 75 }], 'the first value and the last; 22 and 23 were never sent');
+});
+
+const AUTO = Characteristic.TargetHeatingCoolingState.AUTO;
+
+test('review S2: a rollback tells the Home app which mode and which target it went back to', async () => {
+  const h = build(); // COOL, 75 F (23.9 C)
+  h.nexia.setZoneMode = async () => { throw new Error('HTTP 500'); };
+  h.raw.target(HEAT);
+  await h.settle();
+  assert.equal(updatesOf(h, Characteristic.TargetHeatingCoolingState).at(-1), COOL, 'the mode the tile must show again');
+  assert.equal(updatesOf(h, Characteristic.TargetTemperature).at(-1), 23.9, 'and the target');
+});
+
+test('review S2: after a poll shows a change made on the wall, a failed write rolls back to what that poll showed', async () => {
+  const h = build();
+  await h.target.setter(HEAT); // batch 1 succeeds: Nexia confirmed HEAT
+  const wall = xl824();
+  wall.zones[0].current_zone_mode = 'AUTO'; // someone sets AUTO on the thermostat; the next poll shows it
+  h.clock.t = 9_000;
+  h.acc.update(wall, wall.zones[0], 9_001);
+  assert.equal(h.target.getter(), AUTO);
+
+  h.nexia.setZoneMode = async () => { throw new Error('HTTP 500'); };
+  h.raw.target(COOL);
+  await h.settle();
+  assert.equal(h.target.getter(), AUTO, 'back to AUTO, not to the HEAT confirmed before the poll');
+});
+
+test('review S2: while more changes are queued the tile shows the latest request, never an intermediate state', async () => {
+  const h = build(); // COOL: heat 68, cool 75
+  h.raw.temp(23);      // A: a cooling target
+  h.raw.target(HEAT);  // B
+  h.raw.temp(22);      // C: a heating target
+  await h.settle();
+  assert.deepEqual(h.calls, [['setpoints', { cool: 73 }], ['mode', 'HEAT'], ['setpoints', { heat: 72, cool: 75 }]]);
+  const shown = updatesOf(h, Characteristic.TargetTemperature);
+  assert.ok(shown.length >= 3);
+  assert.deepEqual([...new Set(shown)], [22.2], 'every push showed the latest request (72 F); none flickered to a value in between');
+});
+
+test('review N1: on shutdown a change that is still pausing is sent at once', async () => {
+  const h = build();
+  h.raw.temp(23);
+  assert.equal(h.calls.length, 0);
+  await h.acc.flushPendingWrites();
+  assert.deepEqual(h.calls, [['setpoints', { cool: 73 }]]);
+  assert.equal(h.timers[0].cancelled, true, 'its pause was cancelled, not left to fire later');
+});
+
+test('review N2: if sending a change throws something unexpected, the queue is not left stuck ignoring every poll', async () => {
+  const h = build();
+  const original = h.svc.updateCharacteristic.bind(h.svc);
+  let fail = true;
+  h.svc.updateCharacteristic = (c, v) => { if (fail) { fail = false; throw new Error('boom'); } return original(c, v); };
+  h.raw.target(HEAT);
+  await h.settle();
+  assert.ok(h.logs.error.some(l => /unexpected error while sending a change: boom/.test(l)));
+  assert.equal(h.acc.writesPending(), false, 'not stuck');
+
+  const fresh = xl824();
+  fresh.zones[0].cooling_setpoint = 72;
+  h.clock.t = 9_000;
+  h.acc.update(fresh, fresh.zones[0], 9_001);
+  assert.equal(h.temp.getter(), 22.2, 'polls are applied again');
+});
+
+test('review M1 (the state that is left): a rollback leaves a pause timer running; a mode change inside that window still rolls back', async () => {
+  const h = build();
+  const { gate, release } = deferred();
+  const rejectFirst = new Error('HTTP 500');
+  let sends = 0;
+  h.nexia.setSetpoints = async () => { sends += 1; if (sends === 1) { await gate; throw rejectFirst; } };
+  h.nexia.setZoneMode = async () => { throw new Error('HTTP 502'); };
+
+  h.raw.temp(23);
+  fire(h.timers[0]); await tick();   // request 1 is in flight, and will fail
+  h.raw.temp(24);                    // queued behind it with its pause running
+  release(); await tick(); await tick(); // request 1 fails: rollBack drops the queue, but the pause timer is still running
+  assert.equal(h.acc.writesPending(), true, 'the stale pause timer is still pending, as the scenario needs');
+
+  h.raw.target(HEAT);                // inside that window
+  await h.settle();                  // the mode change fails too
+  assert.equal(h.target.getter(), COOL, 'rolled back to the confirmed COOL');
+  assert.equal(updatesOf(h, Characteristic.TargetHeatingCoolingState).at(-1), COOL, 'and the Home app was told');
+});
+
+test('review N2 (a change still queued behind the one that throws): the queue is not left stuck ignoring every poll', async () => {
+  const h = build();
+  const original = h.svc.updateCharacteristic.bind(h.svc);
+  let fail = true;
+  h.svc.updateCharacteristic = (c, v) => { if (fail) { fail = false; throw new Error('boom'); } return original(c, v); };
+  h.raw.temp(23);       // sent first; its bookkeeping throws something nothing anticipated
+  h.raw.target(HEAT);   // still queued behind it
+  await h.settle();
+
+  assert.ok(h.logs.error.some(l => /unexpected error while sending a change: boom/.test(l)));
+  assert.equal(h.acc.writesPending(), false, 'the change queued behind it was dropped, not left to block every poll');
+  assert.deepEqual(h.calls, [['setpoints', { cool: 73 }]], 'the dropped mode change was never sent');
+  assert.equal(h.target.getter(), COOL, 'and the tile shows the mode Nexia is really in');
+
+  const fresh = xl824();
+  fresh.zones[0].cooling_setpoint = 72;
+  h.clock.t = 9_000;
+  h.acc.update(fresh, fresh.zones[0], 9_001);
+  assert.equal(h.temp.getter(), 22.2, 'polls are applied again');
 });

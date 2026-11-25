@@ -241,3 +241,56 @@ test('1.1.4: schedule runs a function later and returns a canceller', async () =
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.deepEqual(ran, ['kept']);
 });
+
+// --- Added after the lead-engineer review of PR #5 ---
+test('review S3: a failed write while a poll is in flight asks for another poll right after it, once', () => {
+  const h = buildPlatform();
+  h.platform.pollingEnabled = true;
+  h.platform.polling = true; // that poll may have started before the change, and its result will be thrown away
+  h.platform.requestPollSoon();
+  assert.equal(h.platform.afterPoll(30_000), 1_000);
+  assert.equal(h.platform.afterPoll(30_000), 30_000, 'only once');
+});
+
+test('review S3: the poll loop uses it: a request made during a poll shortens the wait that follows', async () => {
+  const h = buildPlatform();
+  h.platform.pollingEnabled = true;
+  const delays = [];
+  const real = h.platform.scheduleNextPoll.bind(h.platform);
+  h.platform.scheduleNextPoll = ms => { delays.push(ms); if (delays.length === 1) real(ms); };
+  h.platform.pollOnce = async () => { h.platform.polling = true; h.platform.requestPollSoon(); h.platform.polling = false; return 30_000; };
+  h.platform.scheduleNextPoll(5);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(delays, [5, 1_000]);
+});
+
+test('review N3: while Nexia is failing, the backoff decides: a failed write does not pull the next poll forward', () => {
+  const h = buildPlatform();
+  h.platform.pollingEnabled = true;
+  h.platform.failures = 3;
+  const delays = [];
+  h.platform.scheduleNextPoll = ms => delays.push(ms);
+  h.platform.requestPollSoon();
+  assert.deepEqual(delays, []);
+
+  h.platform.failures = 0;
+  h.platform.polling = true;
+  h.platform.requestPollSoon();       // flagged while healthy...
+  h.platform.failures = 2;            // ...but that poll failed
+  assert.equal(h.platform.afterPoll(120_000), 120_000, 'the backoff delay stands');
+});
+
+test('review N1: on shutdown the platform sends the changes that are still waiting out their pause', async () => {
+  const h = buildPlatform();
+  h.setHouse(fullHouse());
+  await h.poll();
+  const sent = [];
+  h.platform.nexia.setSetpoints = async (z, payload) => { sent.push(payload); };
+  const handler = [...h.platform.handlers.values()].find(x => x.constructor.name === 'ThermostatAccessory');
+  handler.setTargetTemp(23); // a change from the Home app: queued, pausing
+  assert.deepEqual(sent, []);
+  h.platform.stop();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent, [{ cool: 73 }]);
+});
