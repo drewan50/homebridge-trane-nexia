@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Changing the temperature or mode in the Home app no longer makes Homebridge log "This plugin slows down Homebridge ... write handler ... was slow to respond". Writes used to hold the Home app's request open for the whole round trip to the thermostat, which can take several seconds. The Home app is now answered immediately and the change is sent to Nexia in the background. Changes made in quick succession (dragging the slider) are merged so only the last value is sent, one request is in flight at a time, and changes are sent in the order they were made, each temperature change keeping the mode it was made under. Polls that arrive while a change is waiting are ignored, so the tile no longer flickers back and forth. If a change cannot be sent, the tile goes back to what the thermostat last confirmed, the error is logged, and the plugin re-reads the thermostat right away. The trade-off: the Home app can no longer show "No Response" for a change that fails later, because it has already been answered.
+- A change that is still waiting out its short pause when Homebridge shuts down is now sent instead of being lost.
+- A temporary DNS failure when contacting Nexia (`EAI_AGAIN`, `ENOTFOUND`) is now retried once after a second, for reads and changes alike. Nothing has been sent when a name lookup fails, so repeating it cannot do anything twice.
+- Requests to Nexia no longer follow HTTP redirects. Following one would repeat a write at the new address (which also made the DNS retry above unsafe in that one case) and would send the Mobile ID and API Key to whatever host the redirect names. No Nexia mobile endpoint redirects, so nothing changes in normal use.
+- Only one polling loop can exist at a time: asking for an early poll can no longer start a second loop.
+
 ## [1.1.3] - 2026-11-25
 
 ### Fixed

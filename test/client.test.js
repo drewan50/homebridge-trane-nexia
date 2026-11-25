@@ -133,3 +133,78 @@ test('S8 mode: update_thermostat_mode first, then self, then the conventional UR
     assert.equal(calls[2].init.method, 'POST');
   });
 });
+
+// --- 1.1.4: one retry when the name lookup fails ---
+const dnsFailure = (code = 'EAI_AGAIN') => Object.assign(new TypeError('fetch failed'), { cause: { code } });
+const emptyHouse = () => json({ result: { _links: { child: [{ data: { items: [] } }] } } });
+
+test('1.1.4: a DNS failure is retried once, for reads and writes alike (nothing was sent the first time)', async () => {
+  let n = 0;
+  await withFetch(() => { if (n++ === 0) throw dnsFailure(); return emptyHouse(); }, async (calls) => {
+    const house = await client({ retryDelayMs: 1 }).getHouse();
+    assert.deepEqual(house.items, []);
+    assert.equal(calls.length, 2);
+  });
+
+  n = 0;
+  const z = zone([{ name: 'thermostat', actions: { set_heat_setpoint: act('https://x/mobile/xxl_zones/9/setpoints') } }]);
+  await withFetch(() => { if (n++ === 0) throw dnsFailure(); return json({}); }, async (calls) => {
+    await client({ retryDelayMs: 1 }).setSetpoints(z, { heat: 70 });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls.map(c => c.init.method), ['POST', 'POST']);
+    assert.deepEqual(calls.map(c => c.init.body), [JSON.stringify({ heat: 70 }), JSON.stringify({ heat: 70 })]);
+  });
+});
+
+test('1.1.4: a second DNS failure gives up and says so; other failures are not retried', async () => {
+  await withFetch(() => { throw dnsFailure(); }, async (calls) => {
+    await assert.rejects(client({ retryDelayMs: 1 }).getHouse(), /EAI_AGAIN\) after one retry/);
+    assert.equal(calls.length, 2);
+  });
+  await withFetch(() => { throw dnsFailure('ENOTFOUND'); }, async (calls) => {
+    await assert.rejects(client({ retryDelayMs: 1 }).getHouse(), /ENOTFOUND/);
+    assert.equal(calls.length, 2, 'ENOTFOUND is a lookup failure too');
+  });
+  await withFetch(() => { throw dnsFailure('ECONNRESET'); }, async (calls) => {
+    await assert.rejects(client({ retryDelayMs: 1 }).getHouse(), /ECONNRESET/);
+    assert.equal(calls.length, 1, 'a reset may have reached the server: never repeat it');
+  });
+  await withFetch(() => json({ error: 'boom' }, 500), async (calls) => {
+    await assert.rejects(client({ retryDelayMs: 1 }).getHouse(), e => e instanceof NexiaHttpError && e.status === 500);
+    assert.equal(calls.length, 1, 'an HTTP error is an answer, not a lookup failure');
+  });
+});
+
+// --- Added after the lead-engineer review of PR #5 ---
+const http = require('node:http');
+const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
+const closeServer = server => new Promise(resolve => { server.closeAllConnections?.(); server.close(() => resolve()); });
+
+test('review M2: a redirect is never followed: a write is not repeated and the credentials do not follow it to another host', async () => {
+  const seen = { first: [], other: [] };
+  const other = http.createServer((req, res) => { seen.other.push(`${req.method} ${req.url} x-apikey=${req.headers['x-apikey']}`); res.end('{}'); });
+  const otherPort = await listen(other);
+  const first = http.createServer((req, res) => { seen.first.push(`${req.method} ${req.url}`); res.writeHead(307, { Location: `http://127.0.0.1:${otherPort}/stolen` }); res.end(); });
+  const port = await listen(first);
+  try {
+    const z = zone([{ name: 'thermostat', actions: { set_heat_setpoint: act(`http://127.0.0.1:${port}/mobile/xxl_zones/9/setpoints`) } }]);
+    await assert.rejects(client({ apiUrl: `http://127.0.0.1:${port}/mobile/`, retryDelayMs: 1 }).setSetpoints(z, { heat: 70 }), /failed/);
+    assert.equal(seen.first.length, 1, 'the write reached the server once');
+    assert.deepEqual(seen.other, [], 'nothing, and above all not the API key, reached the other host');
+  } finally {
+    await closeServer(first);
+    await closeServer(other);
+  }
+});
+
+test('review M2: every request, including activation, refuses redirects', async () => {
+  await withFetch(() => json({ result: { _links: { child: [{ data: { items: [] } }] } } }), async (calls) => {
+    await client().getHouse();
+    await client().setSetpoints(zone([{ name: 'thermostat', actions: { set_heat_setpoint: act('https://x/mobile/xxl_zones/9/setpoints') } }]), { heat: 70 });
+    assert.deepEqual(calls.map(c => c.init.redirect), ['error', 'error']);
+  });
+  await withFetch(() => json({ result: { mobile_id: 'a', api_key: 'b' } }), async (calls) => {
+    await NexiaClient.activate('trane', '123456789012');
+    assert.equal(calls[0].init.redirect, 'error');
+  });
+});

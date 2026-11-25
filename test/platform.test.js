@@ -193,3 +193,104 @@ test('race: a thermostat handler is told when its poll started', async () => {
   assert.equal(seen.length, 1);
   assert.equal(typeof seen[0], 'number');
 });
+
+// --- 1.1.4: scheduler and "poll again soon" ---
+test('1.1.4: requestPollSoon asks for a poll in about a second; not before the poller starts, while one runs, or after shutdown', () => {
+  const h = buildPlatform();
+  const delays = [];
+  h.platform.scheduleNextPoll = ms => delays.push(ms);
+
+  h.platform.requestPollSoon();
+  assert.deepEqual(delays, [], 'poller not started');
+
+  h.platform.pollingEnabled = true;
+  h.platform.requestPollSoon();
+  assert.deepEqual(delays, [1000]);
+
+  h.platform.polling = true;
+  h.platform.requestPollSoon();
+  assert.deepEqual(delays, [1000], 'a running poll will schedule the next one itself');
+
+  h.platform.polling = false;
+  h.platform.stopping = true;
+  h.platform.requestPollSoon();
+  assert.deepEqual(delays, [1000], 'shut down');
+});
+
+test('1.1.4: there is only ever one poll chain: scheduling again replaces the pending timer', async () => {
+  const h = buildPlatform();
+  let polls = 0;
+  // Each poll ends the chain (stopping), so a broken implementation can't leave long timers running after the assertion.
+  h.platform.pollOnce = async () => { polls += 1; h.platform.stopping = true; return 60_000; };
+  try {
+    h.platform.scheduleNextPoll(5);
+    h.platform.scheduleNextPoll(5);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(polls, 1);
+  } finally {
+    h.platform.stop(); // always: otherwise a failing assertion would leave a poll chain running and hang the test run
+  }
+});
+
+test('1.1.4: schedule runs a function later and returns a canceller', async () => {
+  const h = buildPlatform();
+  let ran = [];
+  const cancel = h.platform.schedule(() => ran.push('cancelled'), 10);
+  h.platform.schedule(() => ran.push('kept'), 10);
+  cancel();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.deepEqual(ran, ['kept']);
+});
+
+// --- Added after the lead-engineer review of PR #5 ---
+test('review S3: a failed write while a poll is in flight asks for another poll right after it, once', () => {
+  const h = buildPlatform();
+  h.platform.pollingEnabled = true;
+  h.platform.polling = true; // that poll may have started before the change, and its result will be thrown away
+  h.platform.requestPollSoon();
+  assert.equal(h.platform.afterPoll(30_000), 1_000);
+  assert.equal(h.platform.afterPoll(30_000), 30_000, 'only once');
+});
+
+test('review S3: the poll loop uses it: a request made during a poll shortens the wait that follows', async () => {
+  const h = buildPlatform();
+  h.platform.pollingEnabled = true;
+  const delays = [];
+  const real = h.platform.scheduleNextPoll.bind(h.platform);
+  h.platform.scheduleNextPoll = ms => { delays.push(ms); if (delays.length === 1) real(ms); };
+  h.platform.pollOnce = async () => { h.platform.polling = true; h.platform.requestPollSoon(); h.platform.polling = false; return 30_000; };
+  h.platform.scheduleNextPoll(5);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(delays, [5, 1_000]);
+});
+
+test('review N3: while Nexia is failing, the backoff decides: a failed write does not pull the next poll forward', () => {
+  const h = buildPlatform();
+  h.platform.pollingEnabled = true;
+  h.platform.failures = 3;
+  const delays = [];
+  h.platform.scheduleNextPoll = ms => delays.push(ms);
+  h.platform.requestPollSoon();
+  assert.deepEqual(delays, []);
+
+  h.platform.failures = 0;
+  h.platform.polling = true;
+  h.platform.requestPollSoon();       // flagged while healthy...
+  h.platform.failures = 2;            // ...but that poll failed
+  assert.equal(h.platform.afterPoll(120_000), 120_000, 'the backoff delay stands');
+});
+
+test('review N1: on shutdown the platform sends the changes that are still waiting out their pause', async () => {
+  const h = buildPlatform();
+  h.setHouse(fullHouse());
+  await h.poll();
+  const sent = [];
+  h.platform.nexia.setSetpoints = async (z, payload) => { sent.push(payload); };
+  const handler = [...h.platform.handlers.values()].find(x => x.constructor.name === 'ThermostatAccessory');
+  handler.setTargetTemp(23); // a change from the Home app: queued, pausing
+  assert.deepEqual(sent, []);
+  h.platform.stop();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent, [{ cool: 73 }]);
+});
