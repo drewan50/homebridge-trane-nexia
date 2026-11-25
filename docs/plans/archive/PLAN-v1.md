@@ -1,8 +1,10 @@
 # PLAN-v1: Modernize, fix issue #1, review
 
-Status: Iteration A approved for implementation 2026-11-25 (owner request in chat: update dependencies, review and fix GitHub issue #1, run a lead-engineer review). Lead-engineer review 2026-11-25: returned with 3 Must-fix items; applied in A3 (a re-review before release is recommended). Owner decisions 2026-11-25: fix everything from the review (A4); keep Node 18/20; publish from GitHub Actions (A5); version 1.1.3; reply on issue #1 (posted). Release not yet approved.
+Status: **IMPLEMENTED and released as v1.1.3 on 2026-11-25** (PR #2 and PR #3; release merge commit `b04428d`). Archived. Open follow-ups moved to [PLAN-v2](../../../PLAN-v2.md).
 
-Owner-directed scope; items are small and ordered. The lead-engineer reviews the whole iteration after A2 (item A3 is filled from that review). The release itself follows [docs/ops/RELEASE.md](docs/ops/RELEASE.md) and needs the owner's yes.
+Approval history: Iteration A approved for implementation 2026-11-25 (owner request in chat: update dependencies, review and fix GitHub issue #1, run a lead-engineer review). Lead-engineer review 2026-11-25: returned with 3 Must-fix items; applied in A3 (a re-review before release is recommended). Owner decisions 2026-11-25: fix everything from the review (A4); keep Node 18/20; publish from GitHub Actions (A5); version 1.1.3; reply on issue #1 (posted). Release not yet approved.
+
+Owner-directed scope; items are small and ordered. The lead-engineer reviews the whole iteration after A2 (item A3 is filled from that review). The release itself follows [docs/ops/RELEASE.md](../../ops/RELEASE.md) and needs the owner's yes.
 
 ## Product
 
@@ -42,7 +44,7 @@ Verified against: `node_modules/homebridge` (v2.5.0) `Logger.log` drops debug un
   - **Goal:** current toolchain, zero audit findings, no behavior change for users.
   - **Files:** `package.json`, `package-lock.json`, `tsconfig.json`, `.github/workflows/build.yml`.
   - **Acceptance:** `npm ci` + `npm run build` clean on Node 24; `npm audit` 0; `npm pack --dry-run` ships only the allowlist; compiled output equivalent to the TS 5.9 build; plugin loads, registers, polls and creates accessories inside real Homebridge 1.11.4 and 2.5.0.
-  - **Verified:** all of the above locally (Node 22.23.5 and 24.22.3). **Left for CI:** Node 18, 20 and 26 smoke legs; the owner's NAS install.
+  - **Verified:** all of the above locally (Node 22.23.5 and 24.22.3). **Left for CI:** Node 18, 20 and 26 smoke legs (all passed on PR #2, PR #3 and `main`, 2026-11-25); the owner's NAS install.
 
 - [x] A2 — Fix issue #1: resolve zone mode and activity from every known payload location; make `debug` work
   - **Verified:** 19 `node:test` cases pass on Node 22.23.5 and 24.22.3 (CI runs them on 18, 20, 22, 24, 26). The tests caught a real bug in my first cut (an empty payload never warned). In real Homebridge 2.5.0 and 1.11.4 (no `-D`), a UX360-shaped payload resolves `mode=COOL`, per-zone activity cooling/idle, and `[nexia]`/`[debug]` lines appear. **Not verified:** against a real UX360 payload (none available), on the owner's NAS, or how the Home app renders "No Response". The fixture shape is derived from the reference implementation, not captured.
@@ -77,11 +79,11 @@ Verified against: `node_modules/homebridge` (v2.5.0) `Logger.log` drops debug un
   - **Nice** (all done): HAP default value moved inside the range before `setProps`; one scale lookup for thermostat and outdoor sensor (zone feature, thermostat feature, thermostat `scale` setting); mode-source order follows the reference's zoned/non-zoned rule (zoned = non-empty `zone.settings`); warning re-armed after a recovery; `url()` always rebuilds on the configured origin (http-same-host, `apiUrl` prefix and root-relative links fixed); a poll that started before a write is ignored; Off zone is idle; mode change refreshes the target; Off-mode ignore logged at info; source maps no longer shipped; CI builds once and tests per Node.
   - **Verified:** 87 tests (34 before A3/A4) pass on Node 22 and 24 with none cancelled (running Node 22 caught a test that hung because `AbortSignal.timeout`'s timer is unref'd; fixed in the test), each new behavior with a test; 8 of the 9 new client tests fail against the old client (the ninth is the control). The final accessory code was run **read-only against your real XL824/XL850 payloads** (getters only): mode HEAT/HEAT, real temperatures and humidity, no warnings, no HAP range warning, and the same activity as the old rule. **Not verified:** writes on a real thermostat (we never write without the owner's yes: the deadband/AUTO write logic is tested against fakes and mirrors the reference), a real UX360, the NAS, CI on Node 18/20/26.
 
-- [ ] A5 — Publish from GitHub Actions (code done; the rest is the owner's)
+- [x] A5 — Publish from GitHub Actions
   - **Built:** `.github/workflows/release.yml` (tag `vX.Y.Z` push, or manual *Run workflow* with *publish*; manual without publish is a rehearsal), reusing the CI gate (`build.yml` as a reusable workflow, Node 18/20/22/24/26) and `scripts/release.js` (`prepare`, `check`, `notes`, tested). npm trusted publishing (OIDC, provenance), GitHub release created from the changelog, idempotent on re-run, refuses commits not on `main`, a tag on another commit, a lockfile out of sync, a non-empty `[Unreleased]`. Runbook: `docs/ops/RELEASE.md`.
-  - **Owner steps (cannot be done by an agent):** merge to `main`; rehearse; create the npm Trusted Publisher entry (owner `drewan50`, repo `homebridge-trane-nexia`, workflow `release.yml`, publishing allowed) **within 2 days of the first publish**; run the first release; then optionally "disallow tokens" on npm, a `v*` tag ruleset, and a required-reviewer environment.
-  - **Not verifiable here:** the workflow has never run (GitHub only runs it from `main`), and OIDC publishing can only be proven by the first real run. YAML validated, every pinned action tag checked to exist, the helper scripts and the version-bump preview tested locally.
-  - **Release prepared?** No, deliberately: `[Unreleased]` is still open and the version is 1.1.2. After the pipeline PR merges, `node scripts/release.js prepare 1.1.3` goes in its own small `release-1.1.3` PR, on the owner's go-ahead (docs/ops/RELEASE.md, "First release").
+  - **Done 2026-11-25:** PR #2 (pipeline and fixes) and PR #3 (release 1.1.3) merged; rehearsal run 45644069887 on `release-1.1.3`; real run 45646269405 on `main`: 1.1.3 on npm with `latest` pointing at it, SLSA provenance attestation, registry shasum equal to the one in the CI log, tag `v1.1.3` on `b04428d`, and the GitHub release created by the workflow. npm took a few minutes to serve the version after the run was green (its own log says so); documented in the runbook.
+  - **Hardening:** GitHub tag ruleset "Protect release tags" (deletion and update on `refs/tags/v*`, no bypass; creation is not restricted because the workflow's bot creates the tag) created 2026-11-25. npm "Require two-factor authentication and disallow tokens" is the owner's to set (needs their login and 2FA); it needs no re-release.
+  - **Not proven, carried to PLAN-v2:** the UX360 fix until the reporter's `[debug]` line arrives; any write on a real thermostat.
 
 ### Discovered
 

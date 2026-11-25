@@ -44,7 +44,7 @@ Or via the Homebridge Config UI X web interface: search for `homebridge-trane-ne
 
 `hb-service add` on older SPK builds rejects local file paths. Use one of the two methods below.
 
-#### Method A — Install from npm registry (recommended once published)
+#### Method A — Install from npm registry (recommended)
 
 ```sh
 ssh admin@<nas-ip>
@@ -53,7 +53,7 @@ sudo hb-service add homebridge-trane-nexia
 
 #### Method B — Install from local tarball
 
-Use this method when installing a build that is not yet published to npm.
+Use this method to install a build that is not on npm, such as a local test build.
 
 **1. Copy the tarball to the NAS** (from your Mac, using the Homebridge shared folder over SMB):
 
@@ -234,7 +234,7 @@ sudo hb-service restart
 
 ### Plugin does not appear in the Homebridge UI plugin list
 
-The Homebridge Config UI X only lists plugins installed via `hb-service add`. Installing via raw `npm install` puts the plugin in the right place for Homebridge to load it, but the UI won't list it under Plugins. This is cosmetic — the plugin will still work. To make it appear, reinstall using `hb-service add` once the package is published to npm.
+The Homebridge Config UI X only lists plugins installed via `hb-service add`. Installing via raw `npm install` puts the plugin in the right place for Homebridge to load it, but the UI won't list it under Plugins. This is cosmetic — the plugin will still work. To make it appear, reinstall it with `hb-service add homebridge-trane-nexia` (Method A above).
 
 ### "hb-service add" returns "Invalid Plugin name."
 
