@@ -1,0 +1,49 @@
+{
+  "_note": "SYNTHETIC. Modeled on the XL824/XL850 shape this plugin was built against (zone.current_zone_mode, thermostat.system_status). IDs and serial are fake.",
+  "id": 1001,
+  "name": "Test Thermostat",
+  "type": "xl824",
+  "manufacturer": "Trane",
+  "connected": true,
+  "system_status": "System Idle",
+  "has_indoor_humidity": true,
+  "indoor_humidity": "41",
+  "has_outdoor_temperature": true,
+  "outdoor_temperature": "51",
+  "features": [
+    {
+      "name": "advanced_info",
+      "items": [
+        { "label": "Model", "value": "XL824" },
+        { "label": "AUID", "value": "TEST-0001" },
+        { "label": "Firmware Version", "value": "5.9.5" }
+      ]
+    }
+  ],
+  "zones": [
+    {
+      "id": 2001,
+      "type": "xxl_zone",
+      "name": "NativeZone",
+      "current_zone_mode": "COOL",
+      "temperature": 74,
+      "heating_setpoint": 68,
+      "cooling_setpoint": 75,
+      "features": [
+        {
+          "name": "thermostat",
+          "scale": "f",
+          "setpoint_heat_min": 55,
+          "setpoint_cool_max": 99,
+          "setpoint_increment": 1,
+          "setpoint_delta": 3,
+          "actions": { "set_cool_setpoint": { "href": "https://example.invalid/mobile/xxl_zones/2001/setpoints" } }
+        },
+        {
+          "name": "thermostat_mode",
+          "actions": { "update_thermostat_mode": { "href": "https://example.invalid/mobile/xxl_zones/2001/zone_mode" } }
+        }
+      ]
+    }
+  ]
+}

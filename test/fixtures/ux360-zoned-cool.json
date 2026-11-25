@@ -1,0 +1,65 @@
+{
+  "_note": "UNVERIFIED. Synthetic UX360-style payload built from the keys the reference implementation (github.com/bdraco/nexia, zone.py) reads: no zone.current_zone_mode; the mode lives in zone.settings[zone_mode] and the thermostat_mode feature; per-zone zone_status; zone ids are small and repeat across thermostats. Replace with the sanitized payload from issue #1 once the reporter supplies it. IDs are fake.",
+  "id": 3001,
+  "name": "Upstairs",
+  "type": "ux360",
+  "manufacturer": "American Standard",
+  "connected": true,
+  "system_status": "Cooling",
+  "features": [
+    {
+      "name": "advanced_info",
+      "items": [
+        { "label": "Model", "value": "UX360" },
+        { "label": "AUID", "value": "TEST-0360" },
+        { "label": "Firmware Version", "value": "1.0.0" }
+      ]
+    }
+  ],
+  "zones": [
+    {
+      "id": 1,
+      "type": "xxl_zone",
+      "name": "Living Room",
+      "zone_status": "Cooling",
+      "settings": [
+        { "type": "zone_mode", "current_value": "COOL", "options": [{ "value": "COOL", "label": "Cool" }] }
+      ],
+      "temperature": 75,
+      "heating_setpoint": 68,
+      "cooling_setpoint": 74,
+      "features": [
+        {
+          "name": "thermostat",
+          "scale": "f",
+          "setpoint_heat_min": 55,
+          "setpoint_cool_max": 99,
+          "setpoint_increment": 1,
+          "setpoint_delta": 3,
+          "actions": { "set_cool_setpoint": { "href": "https://example.invalid/mobile/xxl_zones/1/setpoints" } }
+        },
+        {
+          "name": "thermostat_mode",
+          "value": "COOL",
+          "actions": { "update_thermostat_mode": { "href": "https://example.invalid/mobile/xxl_zones/1/zone_mode" } }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "xxl_zone",
+      "name": "Bedroom",
+      "zone_status": "Idle",
+      "settings": [
+        { "type": "zone_mode", "current_value": "COOL" }
+      ],
+      "temperature": 72,
+      "heating_setpoint": 68,
+      "cooling_setpoint": 74,
+      "features": [
+        { "name": "thermostat", "scale": "f" },
+        { "name": "thermostat_mode", "value": "COOL" }
+      ]
+    }
+  ]
+}
