@@ -3,13 +3,25 @@ import { BRANDS, baseUrlFor } from '../settings';
 import type {
   ActivateResponse,
   Brand,
+  FeatureAction,
   House,
   HouseResponse,
   SessionResponse,
-  Thermostat,
   Zone,
   ZoneMode,
 } from './types';
+
+/** Every request gets this long, including reading the response. Without a limit a half-open connection
+ *  stalls polling (and a pending HomeKit write) for minutes. */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** A non-2xx answer from Nexia. `status` lets callers tell "your key was rejected" from "Nexia is down". */
+export class NexiaHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = 'NexiaHttpError';
+  }
+}
 
 export interface NexiaClientOptions {
   brand: Brand;
@@ -20,6 +32,21 @@ export interface NexiaClientOptions {
   apiUrl?: string;
   log?: Logging;
   debug?: boolean;
+  /** Per-request limit in milliseconds; defaults to REQUEST_TIMEOUT_MS. Exposed so tests don't wait 15 s. */
+  timeoutMs?: number;
+}
+
+type Method = 'GET' | 'POST' | 'PUT';
+interface Action { href: string; method: 'POST' | 'PUT' }
+
+function describeFetchError(method: string, url: string, e: unknown, timeoutMs: number): Error {
+  const err = e as { name?: string; message?: string; cause?: { code?: string; message?: string } };
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+    return new Error(`Nexia ${method} ${url} timed out after ${timeoutMs / 1000}s`);
+  }
+  // undici reports every network failure as "fetch failed"; the useful part is on `cause` (ENOTFOUND, ECONNRESET, ...).
+  const cause = err?.cause?.code ?? err?.cause?.message;
+  return new Error(`Nexia ${method} ${url} failed: ${err?.message ?? String(e)}${cause ? ` (${cause})` : ''}`);
 }
 
 export class NexiaClient {
@@ -53,41 +80,58 @@ export class NexiaClient {
     return h;
   }
 
+  /** Turns a path or a link from a Nexia response into a URL on the configured host, always. The mobile
+   *  API's links are absolute and interleave several brand hosts (mynexia.com in a tranehome.com account),
+   *  and the credential headers must never go anywhere but the configured base, over its scheme. */
   private url(pathOrAbsolute: string): string {
+    const base = new URL(this.baseUrl);
+    // An `apiUrl` override may sit under a path prefix in front of /mobile/ (a proxy, a test server).
+    const mobileAt = base.pathname.indexOf('/mobile/');
+    const prefix = mobileAt > 0 ? base.pathname.slice(0, mobileAt) : '';
+    const onBase = (path: string): string => base.origin + (path.startsWith('/mobile/') ? prefix : '') + path;
+
     if (/^https?:\/\//i.test(pathOrAbsolute)) {
-      // Rewrite host to match our configured base so we stay on one brand domain,
-      // even though Nexia's HATEOAS responses interleave mynexia.com URLs.
+      let u: URL;
       try {
-        const u = new URL(pathOrAbsolute);
-        const b = new URL(this.baseUrl);
-        if (u.host !== b.host) return b.origin + u.pathname + u.search + u.hash;
-      } catch { /* fall through */ }
-      return pathOrAbsolute;
+        u = new URL(pathOrAbsolute);
+      } catch {
+        throw new Error('Nexia returned a link that is not a valid URL');
+      }
+      return onBase(u.pathname) + u.search + u.hash;
     }
+    if (pathOrAbsolute.startsWith('/mobile/')) return onBase(pathOrAbsolute);
     return this.baseUrl + pathOrAbsolute.replace(/^\//, '');
   }
 
+  // Info level on purpose: Homebridge drops log.debug unless Homebridge itself runs in debug mode,
+  // which would make the plugin's own `debug: true` option print nothing.
   private log(...args: unknown[]): void {
-    if (this.options.debug) this.options.log?.debug('[nexia]', ...args);
+    if (this.options.debug) this.options.log?.info('[nexia]', ...args);
   }
 
-  private async request<T>(method: 'GET' | 'POST', pathOrUrl: string, body?: unknown): Promise<T> {
+  private async request<T>(method: Method, pathOrUrl: string, body?: unknown): Promise<T> {
     const url = this.url(pathOrUrl);
     this.log(method, url, body ?? '');
-    const res = await fetch(url, {
-      method,
-      headers: this.headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Nexia ${method} ${url} -> HTTP ${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: this.headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(this.options.timeoutMs ?? REQUEST_TIMEOUT_MS),
+      });
+      text = await res.text();
+    } catch (e) {
+      throw describeFetchError(method, url, e, this.options.timeoutMs ?? REQUEST_TIMEOUT_MS);
     }
-    const text = await res.text();
+    if (!res.ok) {
+      throw new NexiaHttpError(res.status, `Nexia ${method} ${url} -> HTTP ${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
+    }
     if (!text) return {} as T;
     try {
       return JSON.parse(text) as T;
-    } catch (e) {
+    } catch {
       throw new Error(`Nexia ${method} ${url} returned non-JSON body: ${text.slice(0, 200)}`);
     }
   }
@@ -116,33 +160,56 @@ export class NexiaClient {
     return { id: Number(id), items };
   }
 
-  async setZoneMode(zone: Zone, mode: ZoneMode): Promise<void> {
-    const href = this.findActionHref(zone, 'thermostat_mode', 'update_thermostat_mode');
-    if (!href) throw new Error(`Zone ${zone.id} has no update_thermostat_mode action`);
+  /** Mode change. The advertised action first (the XL824/XL850 expose `update_thermostat_mode`); `self` for
+   *  models that expose only that; otherwise the conventional URL, as the reference implementation does. */
+  async setZoneMode(zone: Zone, mode: ZoneMode, thermostatId?: number): Promise<void> {
+    const action = this.findAction(zone, 'thermostat_mode', ['update_thermostat_mode', 'self']);
+    if (action) return this.send(action, { value: mode });
+    const href = this.zonePath(zone, thermostatId, 'zone_mode');
+    this.log(`zone ${zone.id} advertises no mode action; using ${href}`);
     await this.request<unknown>('POST', href, { value: mode });
   }
 
-  async setSetpoints(zone: Zone, payload: { heat?: number; cool?: number }): Promise<void> {
-    // Endpoint URL is the same regardless of which setpoint key the server advertises
-    // (e.g. only `set_cool_setpoint` is exposed when the zone is in COOL mode), so we
-    // pick whichever href is present.
-    let href = this.findActionHref(zone, 'thermostat', 'set_heat_setpoint')
-      || this.findActionHref(zone, 'thermostat', 'set_cool_setpoint');
-    if (!href) {
-      const modeHref = this.findActionHref(zone, 'thermostat_mode', 'update_thermostat_mode');
-      if (modeHref) href = modeHref.replace('zone_mode', 'setpoints');
-    }
-    if (!href) href = `${zone.type}s/${zone.id}/setpoints`;
+  /** Setpoint change. The XL824/XL850 advertise `set_heat_setpoint` (or `set_cool_setpoint` in COOL mode) and
+   *  the URL is the same either way, so those stay first; `set_setpoints` and `self` cover other models. The
+   *  action's own `method` is honored (POST unless it says PUT). */
+  async setSetpoints(zone: Zone, payload: { heat?: number; cool?: number }, thermostatId?: number): Promise<void> {
+    const action = this.findAction(zone, 'thermostat', ['set_heat_setpoint', 'set_cool_setpoint', 'set_setpoints', 'self']);
+    if (action) return this.send(action, payload);
+    const modeHref = this.findAction(zone, 'thermostat_mode', ['update_thermostat_mode'])?.href;
+    const href = modeHref ? modeHref.replace('zone_mode', 'setpoints') : this.zonePath(zone, thermostatId, 'setpoints');
     await this.request<unknown>('POST', href, payload);
   }
 
-  async runMode(zone: Zone, mode: 'permanent_hold' | 'run_schedule'): Promise<void> {
-    await this.request<unknown>('POST', `${zone.type}s/${zone.id}/run_mode`, { value: mode });
+  async runMode(zone: Zone, mode: 'permanent_hold' | 'run_schedule', thermostatId?: number): Promise<void> {
+    await this.request<unknown>('POST', this.zonePath(zone, thermostatId, 'run_mode'), { value: mode });
   }
 
-  private findActionHref(zone: Zone, featureName: string, action: string): string | undefined {
-    const feat = zone.features?.find(f => f.name === featureName);
-    return feat?.actions?.[action]?.href;
+  private async send(action: Action, body: unknown): Promise<void> {
+    await this.request<unknown>(action.method, action.href, body);
+  }
+
+  private findAction(zone: Zone, featureName: string, names: string[]): Action | undefined {
+    const actions = zone.features?.find(f => f.name === featureName)?.actions;
+    for (const name of names) {
+      const a: FeatureAction | undefined = actions?.[name];
+      if (typeof a?.href !== 'string' || !a.href) continue;
+      const method = (a.method ?? 'POST').toUpperCase();
+      if (method !== 'POST' && method !== 'PUT') {
+        throw new Error(`Nexia action "${name}" uses unsupported method ${method}`);
+      }
+      return { href: a.href, method };
+    }
+    return undefined;
+  }
+
+  /** The conventional zone URL (`xxl_zones/<id>/<endpoint>`). Zoned systems such as the UX360 reuse small
+   *  zone ids across thermostats, so the reference qualifies those with the thermostat id. */
+  private zonePath(zone: Zone, thermostatId: number | undefined, endpoint: string): string {
+    const qualified = typeof zone.id === 'number' && zone.id < 256 && thermostatId !== undefined;
+    const id = qualified ? `${thermostatId}_${zone.id}` : String(zone.id);
+    const type = zone.type && typeof zone.type === 'string' ? zone.type : 'xxl_zone';
+    return `${type}s/${id}/${endpoint}`;
   }
 
   static async activate(brand: Brand, activationCode: string): Promise<{ mobileId: string; apiKey: string }> {
@@ -150,16 +217,28 @@ export class NexiaClient {
       throw new Error(`Invalid brand "${brand}". Expected one of: ${BRANDS.join(', ')}`);
     }
     const url = baseUrlFor(brand) + 'activate';
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ activation_code: activationCode }),
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(`activate HTTP ${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ activation_code: activationCode }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      text = await res.text();
+    } catch (e) {
+      throw describeFetchError('POST', url, e, REQUEST_TIMEOUT_MS);
     }
-    const data = JSON.parse(text) as ActivateResponse;
+    if (!res.ok) {
+      throw new NexiaHttpError(res.status, `activate HTTP ${res.status} ${res.statusText}: ${text.slice(0, 400)}`);
+    }
+    let data: ActivateResponse;
+    try {
+      data = JSON.parse(text) as ActivateResponse;
+    } catch {
+      throw new Error(`activate returned a non-JSON body: ${text.slice(0, 200)}`);
+    }
     if (!data?.result?.mobile_id || !data?.result?.api_key) {
       throw new Error(`activate response missing mobile_id/api_key: ${text.slice(0, 400)}`);
     }

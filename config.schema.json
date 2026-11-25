@@ -66,7 +66,8 @@
       "debug": {
         "title": "Verbose debug logging",
         "type": "boolean",
-        "default": false
+        "default": false,
+        "description": "Logs every Nexia request and what the plugin read for each thermostat. Shown in the normal Homebridge log; you do not need to enable Homebridge's own debug mode. Useful when reporting a problem."
       }
     }
   }

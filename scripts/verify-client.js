@@ -8,6 +8,8 @@
 const fs = require('fs');
 const path = require('path');
 const { NexiaClient } = require('../dist/nexia/client');
+// Mode and activity come from the same functions the plugin uses, so this report can't drift from it.
+const { resolveZoneMode, resolveActivity, describeZone } = require('../dist/nexia/zoneState');
 
 const fToC = f => (Number.isFinite(Number(f)) ? Math.round(((Number(f) - 32) * (5 / 9)) * 10) / 10 : null);
 const cToF = c => Math.round(Number(c) * (9 / 5) + 32);
@@ -34,11 +36,11 @@ function displayName(thermostat, zone) {
   return z || t || `Thermostat ${thermostat.id}-${zone.id}`;
 }
 
-function targetTempC(zone, scale) {
+function targetTempC(thermostat, zone, scale) {
   const conv = v => (scale === 'f' ? fToC(v) : (Number.isFinite(Number(v)) ? Math.round(Number(v) * 10) / 10 : null));
   const heat = zone.heating_setpoint;
   const cool = zone.cooling_setpoint;
-  switch (zone.current_zone_mode) {
+  switch (resolveZoneMode(thermostat, zone)) {
     case 'HEAT': return conv(heat != null ? heat : cool);
     case 'COOL': return conv(cool != null ? cool : heat);
     case 'AUTO':
@@ -49,11 +51,8 @@ function targetTempC(zone, scale) {
 }
 
 function currentHcState(thermostat, zone) {
-  const status = String(thermostat.system_status || (thermostatFeature(zone) || {}).system_status || '').toLowerCase();
-  if (status.includes('heat')) return 'HEAT (1)';
-  if (status.includes('cool')) return 'COOL (2)';
-  if (status) return `OFF (0) — system_status="${thermostat.system_status}"`;
-  return 'OFF (0) — no system_status';
+  const activity = resolveActivity(thermostat, zone);
+  return { heating: 'HEAT (1)', cooling: 'COOL (2)', idle: 'OFF (0, idle)' }[activity];
 }
 
 function targetTempProps(scale, feature) {
@@ -102,10 +101,10 @@ async function main() {
       console.log(`    FirmwareRevision: ${adv['Firmware Version']}`);
       console.log(`  HomeKit Thermostat characteristics:`);
       console.log(`    CurrentTemp     : ${tC}°C  (native ${z.temperature}°${scale.toUpperCase()})`);
-      console.log(`    TargetTemp      : ${targetTempC(z, scale)}°C`);
+      console.log(`    TargetTemp      : ${targetTempC(t, z, scale)}°C`);
       console.log(`    DisplayUnits    : ${scale === 'f' ? 'FAHRENHEIT' : 'CELSIUS'}`);
       console.log(`    CurrentHCState  : ${currentHcState(t, z)}`);
-      console.log(`    TargetHCState   : ${z.current_zone_mode}`);
+      console.log(`    TargetHCState   : ${resolveZoneMode(t, z) || 'UNKNOWN (Home would show "No Response")'}`);
       console.log(`    Setpoint range  : ${props.minC}°C..${props.maxC}°C  step ${props.stepC}°C  (native ${props.nativeMin}°${scale.toUpperCase()}..${props.nativeMax}°${scale.toUpperCase()} step ${props.nativeInc}°${scale.toUpperCase()})`);
       console.log(`    Setpoint delta  : ${f && f.setpoint_delta != null ? f.setpoint_delta : t.delta}°${scale.toUpperCase()}`);
       const hum = t.indoor_humidity;
@@ -116,8 +115,7 @@ async function main() {
       const outC = outN != null ? (scale === 'f' ? fToC(outN) : Math.round(outN * 10) / 10) : null;
       console.log(`    Outdoor Temp    : ${t.has_outdoor_temperature ? (outC != null ? `${outC}°C (native ${outN}°${scale.toUpperCase()})` : '—') : '(not advertised)'}`);
       console.log(`  raw zone state:`);
-      console.log(`    current_zone_mode=${z.current_zone_mode}  heating_setpoint=${z.heating_setpoint}  cooling_setpoint=${z.cooling_setpoint}`);
-      console.log(`    thermostat.system_status=${JSON.stringify(t.system_status)}`);
+      console.log(`    ${describeZone(t, z)}`);
       console.log(`    available actions: thermostat=[${Object.keys((f && f.actions) || {}).join(', ')}]`);
       const tm = (z.features || []).find(x => x.name === 'thermostat_mode');
       console.log(`                       thermostat_mode=[${Object.keys((tm && tm.actions) || {}).join(', ')}]`);

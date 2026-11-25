@@ -26,11 +26,27 @@ export interface Feature {
   [key: string]: unknown;
 }
 
+// One entry of a `settings[]` array (zone- or thermostat-level), looked up by `type`.
+export interface Setting {
+  type?: string;
+  current_value?: unknown;
+  [key: string]: unknown;
+}
+
 export interface Zone {
   id: number;
   type: string;
   name?: string;
-  current_zone_mode: ZoneMode;
+  // Present on the XL824/XL850 payloads seen so far. Other models (e.g. UX360) may omit it or
+  // carry the mode in `settings[]` / the `thermostat_mode` feature instead: see zoneState.ts.
+  // Kept as a plain string because a payload can hold a value we do not recognize.
+  current_zone_mode?: string;
+  zone_status?: string;
+  operating_state?: string;
+  settings?: Setting[];
+  // The reference implementation reads setpoints from here for every model; the XL824/XL850 also
+  // mirror them in the top-level heating_setpoint / cooling_setpoint below (null when not applicable).
+  setpoints?: { heat?: unknown; cool?: unknown } | null;
   temperature: number;
   heating_setpoint: number | null;
   cooling_setpoint: number | null;
@@ -50,6 +66,7 @@ export interface Thermostat {
   outdoor_temperature?: string | number;
   system_status?: string;
   delta?: number;
+  settings?: Setting[];
   features: Feature[];
   zones: Zone[];
   [key: string]: unknown;

@@ -1,5 +1,6 @@
 import type { PlatformAccessory, Service } from 'homebridge';
 import type { Thermostat } from './nexia/types';
+import { finiteOrNull, resolveScale } from './nexia/zoneState';
 import type { TraneNexiaPlatform } from './platform';
 
 const fToC = (f: number): number => Math.round(((f - 32) * (5 / 9)) * 10) / 10;
@@ -26,10 +27,15 @@ export class OutdoorSensorAccessory {
     this.service = accessory.getService(Service.TemperatureSensor) || accessory.addService(Service.TemperatureSensor);
     this.service.setCharacteristic(Characteristic.Name, 'Outdoor Temperature');
 
-    this.service.getCharacteristic(Characteristic.CurrentTemperature)
-      // Outdoor readings regularly go below HAP's default 0°C floor in winter.
+    // Outdoor readings regularly go below HAP's default 0°C floor in winter. Move HAP's default value
+    // inside the new range first, so setProps doesn't warn about it.
+    const temperature = this.service.getCharacteristic(Characteristic.CurrentTemperature);
+    if (typeof temperature.value === 'number') temperature.value = Math.min(60, Math.max(-50, temperature.value));
+    temperature
       .setProps({ minValue: -50, maxValue: 60, minStep: 0.1 })
       .onGet(() => this.currentTempC());
+
+    this.lastKnownC = this.parseTempC() ?? undefined;
   }
 
   update(thermostat: Thermostat): void {
@@ -41,16 +47,20 @@ export class OutdoorSensorAccessory {
   }
 
   private parseTempC(): number | null {
-    const raw = this.thermostat.outdoor_temperature;
-    if (raw === undefined || raw === null || raw === '') return null;
-    const n = Number(raw);
-    if (!Number.isFinite(n)) return null;
-    const scale = this.thermostat.features?.find(f => f.name === 'thermostat')?.scale ?? 'f';
-    return scale === 'f' ? fToC(n) : Math.round(n * 10) / 10;
+    const n = finiteOrNull(this.thermostat.outdoor_temperature); // Nexia sends "--" when it has no reading
+    if (n === null) return null;
+    // The scale is a thermostat-level fact; read it from the same places the thermostat accessory does.
+    return (resolveScale(this.thermostat) ?? 'f') === 'f' ? fToC(n) : Math.round(n * 10) / 10;
   }
 
   private currentTempC(): number {
-    const c = this.parseTempC();
-    return c !== null ? c : (this.lastKnownC ?? 20);
+    const c = this.parseTempC() ?? this.lastKnownC;
+    if (c === undefined) {
+      // No reading and none ever seen: "No Response", not a made-up 20 °C.
+      const { HapStatusError, HAPStatus } = this.platform.api.hap;
+      throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+    this.lastKnownC = c;
+    return c;
   }
 }

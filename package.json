@@ -23,12 +23,14 @@
   },
   "scripts": {
     "build": "tsc",
-    "clean": "rimraf ./dist",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "watch": "tsc -w",
-    "prepublishOnly": "npm run build"
+    "test": "npm run build && node --test test/*.test.js",
+    "prepublishOnly": "npm run clean && npm test"
   },
   "files": [
     "dist",
+    "!dist/**/*.map",
     "bin",
     "config.schema.json",
     "README.md",
@@ -48,9 +50,8 @@
   ],
   "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "homebridge": "^1.8.0",
-    "rimraf": "^5.0.0",
-    "typescript": "^5.4.0"
+    "@types/node": "^22.20.7",
+    "homebridge": "^2.5.0",
+    "typescript": "^7.0.2"
   }
 }

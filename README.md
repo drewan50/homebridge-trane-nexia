@@ -165,11 +165,11 @@ Open the Homebridge Config UI at `http://<homebridge-ip>:8581`, go to **Config**
 | `mobileId`     | yes      | —        | From `nexia-activate` |
 | `apiKey`       | yes      | —        | From `nexia-activate` |
 | `houseId`      | no       | auto     | Numeric house ID from the URL. Omit to auto-discover from session. |
-| `pollInterval` | no       | `30`     | Seconds between Nexia API polls. Minimum 10. |
+| `pollInterval` | no       | `30`     | Seconds between Nexia API polls, from 10 to 600. A value outside that range, or one that is not a number, is replaced by the nearest limit (or 30) and noted in the log. |
 | `outdoorTemperatureSensor` | no | `true` | Expose a HomeKit temperature sensor for the outdoor reading. Set `false` to disable. |
 | `appVersion`   | no       | —        | Only needed for `brand: "asair"` (sent as `X-AppVersion`). |
 | `apiUrl`       | no       | —        | Override the Nexia API base URL (for debugging). |
-| `debug`        | no       | `false`  | Log all Nexia HTTP calls to the Homebridge log. |
+| `debug`        | no       | `false`  | Verbose logging: every Nexia request, plus a per-thermostat summary of what the plugin read. Shown in the normal Homebridge log; you do not need to enable Homebridge's own debug mode. |
 
 ---
 
@@ -248,13 +248,17 @@ Some older `homebridge-syno-spk` versions do not accept local file paths in `hb-
 
 ### Thermostat shows wrong state / temperature not updating
 
-Enable debug logging to see every Nexia API call:
+Turn on the plugin's debug logging and look at the Homebridge log:
 
-```json
-"debug": true
-```
+1. In the Homebridge UI open **Plugins → Trane Nexia → Settings**, tick **Verbose debug logging**, and save. (Or add `"debug": true` to the `TraneNexia` block in `config.json`.) This is a plugin setting, **not** a command to type in the Homebridge terminal, and you do not need to turn on Homebridge's own debug mode.
+2. Restart Homebridge.
+3. Open the log (Homebridge UI → **Logs**, or `sudo hb-service logs`). You will see `[nexia]` lines for each request, and `[debug]` lines saying what the plugin read for each thermostat zone: the mode and which field it came from, the zone and system status, the temperature and the setpoints.
 
-Restart Homebridge and check the log (`sudo hb-service logs`). Every HTTP request and response is printed with `[nexia]` prefix.
+If a tile shows the wrong mode (for example "Off" while the thermostat is set to Cool), or "No Response", please [open an issue](https://github.com/drewan50/homebridge-trane-nexia/issues) with your thermostat model (for example UX360) and paste the `[debug]` line for that thermostat, plus any `Could not read the thermostat mode` warning. These lines contain no Mobile ID or API Key and no address, but read them over before posting.
+
+### A thermostat shows "No Response" in the Home app
+
+The plugin could not tell which mode that thermostat is in (the Nexia response had no mode field it recognizes), and it never saw a readable mode since starting. It prefers "No Response" to showing a wrong mode. The Homebridge log has a `Could not read the thermostat mode` warning listing the fields it found: please paste it, with the `[debug]` line, in an issue. It will fix itself the moment a readable mode comes back.
 
 ### Temperatures only update every 30 seconds
 
@@ -286,7 +290,11 @@ node scripts/verify-client.js
 
 This prints what each HomeKit accessory will look like — current temp, target temp, mode, setpoint range, humidity — without starting Homebridge or touching HAP.
 
-There are no automated tests; the Nexia API has no public OpenAPI spec or mock fixtures, so meaningful testing requires real credentials.
+```sh
+npm test            # builds, then runs the unit tests (Node's built-in test runner)
+```
+
+The Nexia API has no public specification, so the tests use small synthetic payloads in `test/fixtures/`, modeled on the shapes seen so far. They cover how a thermostat's mode and activity are read and how the HomeKit accessory reacts. Meaningful end-to-end testing still needs real credentials (`scripts/verify-client.js`). If your thermostat model is not covered, a sanitized payload (remove IDs, serial numbers, names and addresses) is the most useful thing you can contribute.
 
 ---
 
@@ -301,6 +309,8 @@ src/
   nexia/
     client.ts              — HTTP client: activate, getHouse, setZoneMode, setSetpoints
     types.ts               — TypeScript interfaces for Nexia API responses
+    zoneState.ts           — Pure functions: which mode a zone is in and what it is doing (tested)
+test/                      — Unit tests (node:test) and synthetic payload fixtures
 bin/
   nexia-activate.js        — CLI helper to exchange an activation code for mobileId + apiKey
 scripts/
