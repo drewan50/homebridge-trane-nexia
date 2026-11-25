@@ -13,7 +13,7 @@ temperature sensor. TypeScript, CommonJS output, **zero runtime dependencies** (
 - Repo: [drewan50/homebridge-trane-nexia](https://github.com/drewan50/homebridge-trane-nexia); npm package `homebridge-trane-nexia`; **Homebridge Verified**.
 - The owner runs it on a Synology NAS (homebridge-syno-spk, Node 22.x, x86_64) against an XL824 and an XL850.
   Other users run it on everything from Raspberry Pis to Docker, so the supported-Node range is a promise (see `engines`).
-- Current version and history: [CHANGELOG.md](CHANGELOG.md). The active plan: [PLAN-v1.md](PLAN-v1.md).
+- Current version and history: [CHANGELOG.md](CHANGELOG.md). Plans: the current draft is [PLAN-v2.md](PLAN-v2.md); finished plans are in [docs/plans/archive/](docs/plans/archive/README.md) (PLAN-v1 shipped as v1.1.3).
 
 **The one product rule that outranks every other decision:** the Home app must tell the truth about the thermostat,
 and an upgrade must never cost a user their Home setup. A wrong mode or temperature is worse than "No Response".
@@ -96,7 +96,7 @@ and the workflow file name is part of that trust.
 Same convention as the owner's other projects: this repo is built through written plans that are reviewed and
 implemented in sequence, not ad hoc changes.
 
-- **The active, not-yet-implemented plan lives in the repo root** (`PLAN-v1.md` first). Once a plan is fully implemented, move it
+- **The active, not-yet-implemented plan lives in the repo root** (`PLAN-v2.md` is the current draft). Once a plan is fully implemented, move it
   to `docs/plans/archive/` with `git mv`, add a `Status: ... commit <hash>` marker near the top, add one line to
   `docs/plans/archive/README.md`, and start `PLAN-v2.md` for the next body of work.
 - Plans are written *grounded in the actual current code and real payloads* (read the relevant files first, cite real files,
@@ -133,7 +133,7 @@ TypeScript / Homebridge / Nexia specialists: `product-designer` (HomeKit product
 
 | Agent default | In this repo |
 |---|---|
-| Product spec | "Product" section of the root plan (`PLAN-v1.md` first). |
+| Product spec | "Product" section of the root plan (`PLAN-v2.md` is the current draft). |
 | Design artifact | The HomeKit mapping table, Config UI X field spec and copy inside that section (no mockup file: the Home app is the UI). |
 | Tech plan + build plan | The same root plan: "Technical plan", then iterations of ordered items. |
 | Gate approvals | A `Status:` line at the top of the plan, e.g. `Status: Iteration A approved for implementation 2026-11-25`. |
