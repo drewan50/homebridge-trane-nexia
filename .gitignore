@@ -4,7 +4,9 @@ dist/
 .DS_Store
 .vscode/
 .idea/
-.claude/
+# Claude Code: share the project's agents; keep personal/local settings out
+.claude/*
+!.claude/agents/
 .env
 *.tgz
 
